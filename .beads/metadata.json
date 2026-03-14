@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "docker_claude",
+  "project_id": "9e7349a3-870e-479d-a6c8-94b50701a1ff"
+}
