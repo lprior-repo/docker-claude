@@ -2,12 +2,20 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use keyring::Entry;
+use serde::{Deserialize, Serialize};
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 const SERVICE: &str = "claude-dock";
 const ACTIVE_KEY: &str = "__active_profile__";
 const MANIFEST_KEY: &str = "__manifest__";
 const DEFAULT_IMAGE: &str = "claude-dock:latest";
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ProfileConfig {
+    key: String,
+    provider: String, // "anthropic" or "minimax"
+}
 
 #[derive(Parser)]
 #[command(
@@ -34,6 +42,18 @@ enum Cmd {
         #[command(subcommand)]
         action: KeyAction,
     },
+    Config,
+    Shell {
+        #[arg(short, long)]
+        profile: Option<String>,
+        #[arg(last = true)]
+        bash_args: Vec<String>,
+    },
+    #[command(hide = true, name = "__entrypoint")]
+    InternalEntrypoint {
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -42,6 +62,8 @@ enum KeyAction {
         name: String,
         #[arg(short, long)]
         key: Option<String>,
+        #[arg(short, long, default_value = "anthropic")]
+        provider: String,
     },
     List,
     Use {
@@ -52,14 +74,14 @@ enum KeyAction {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 enum ContainerState {
     Running,
     Stopped,
     Missing,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 enum LaunchMode {
     New,
     Resume,
@@ -72,92 +94,136 @@ struct LaunchPlan {
     args: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
 struct LaunchInputs<'a> {
     image: &'a str,
-    api_key: &'a str,
+    config: &'a ProfileConfig,
     project_dir: &'a str,
     base_name: &'a str,
-    home: &'a str,
+    host_home: &'a str,
+    uid: &'a str,
+    gid: &'a str,
     extra_claude_args: &'a [String],
     nonce: u32,
+    git_name: Option<String>,
+    git_email: Option<String>,
 }
 
-fn store_secret(_profile: &str, _secret: &str) -> Result<()> {
-    Entry::new(SERVICE, _profile)?
-        .set_password(_secret)
+fn load_profile(profile: &str) -> Result<ProfileConfig> {
+    let raw = load_secret(profile)?;
+    serde_json::from_str::<ProfileConfig>(&raw).map_or_else(
+        |_| {
+            Ok(ProfileConfig {
+                key: raw,
+                provider: "anthropic".to_string(),
+            })
+        },
+        Ok,
+    )
+}
+
+fn store_secret(profile: &str, secret: &str) -> Result<()> {
+    Entry::new(SERVICE, profile)?
+        .set_password(secret)
         .context("storing secret")
 }
 
-fn load_secret(_profile: &str) -> Result<String> {
-    Entry::new(SERVICE, _profile)?
+fn load_secret(profile: &str) -> Result<String> {
+    Entry::new(SERVICE, profile)?
         .get_password()
-        .with_context(|| format!("no key for profile '{_profile}'"))
+        .with_context(|| format!("no key for profile '{profile}'"))
 }
 
-fn delete_secret(_profile: &str) -> Result<()> {
-    Entry::new(SERVICE, _profile)?
+fn delete_secret(profile: &str) -> Result<()> {
+    Entry::new(SERVICE, profile)?
         .delete_credential()
-        .with_context(|| format!("deleting '{_profile}'"))
+        .with_context(|| format!("deleting '{profile}'"))
 }
 
 fn get_active() -> Result<String> {
     load_secret(ACTIVE_KEY).context("no active profile - run: claude-dock key use <name>")
 }
 
-fn register_profile(_name: &str) -> Result<()> {
+fn register_profile(name: &str) -> Result<()> {
     let manifest = load_secret(MANIFEST_KEY).unwrap_or_default();
     let mut profiles: Vec<&str> = manifest.split(',').filter(|s| !s.is_empty()).collect();
 
-    if !profiles.contains(&_name) {
-        profiles.push(_name);
+    if !profiles.contains(&name) {
+        profiles.push(name);
     }
 
     store_secret(MANIFEST_KEY, &profiles.join(","))
 }
 
-fn new_container_args(
-    _image: &str,
-    _api_key: &str,
-    _project_dir: &str,
-    _cname: &str,
-    _home: &str,
-    _extra_claude_args: &[String],
-) -> Vec<String> {
-    let uid = std::process::id().to_string();
+fn new_container_args(inputs: &LaunchInputs<'_>, cname: &str) -> Vec<String> {
     let mut args = vec![
         "run".into(),
         "-it".into(),
         "--rm".into(),
         "--name".into(),
-        _cname.into(),
+        cname.into(),
+        "--entrypoint".into(),
+        "/usr/local/bin/claude-dock".into(),
         "-v".into(),
-        format!("{_project_dir}:/app"),
+        format!("{}:/app", inputs.project_dir),
         "-v".into(),
-        format!("{_home}/.claude:/home/user/.claude"),
+        format!("{}/.claude:/home/user/.claude", inputs.host_home),
         "-v".into(),
-        format!("{_home}/.gitconfig:/home/user/.gitconfig:ro"),
+        format!("{}/.gitconfig:/home/user/.gitconfig:ro", inputs.host_home),
         "-v".into(),
-        format!("{_home}/.git-credentials:/home/user/.git-credentials:ro"),
+        format!(
+            "{}/.git-credentials:/home/user/.git-credentials:ro",
+            inputs.host_home
+        ),
         "-v".into(),
-        format!("{_home}/.jj:/home/user/.jj"),
+        format!("{}/.jj:/home/user/.jj", inputs.host_home),
         "-e".into(),
-        format!("ANTHROPIC_API_KEY={_api_key}"),
+        format!("HOST_HOME={}", inputs.host_home),
         "-e".into(),
-        format!("CONTAINER_USER_ID={}", uid),
+        format!("CONTAINER_USER_ID={}", inputs.uid),
         "-e".into(),
-        format!("CONTAINER_GROUP_ID={}", uid),
-        "-e".into(),
-        "GIT_AUTHOR_NAME=Lewis.Prior".into(),
-        "-e".into(),
-        "GIT_AUTHOR_EMAIL=priorlewis43@gmail.com".into(),
-        "-e".into(),
-        "GIT_COMMITTER_NAME=Lewis.Prior".into(),
-        "-e".into(),
-        "GIT_COMMITTER_EMAIL=priorlewis43@gmail.com".into(),
-        _image.into(),
+        format!("CONTAINER_GROUP_ID={}", inputs.gid),
     ];
 
-    args.extend_from_slice(_extra_claude_args);
+    if let Some(ref name) = inputs.git_name {
+        args.extend(["-e".into(), format!("GIT_AUTHOR_NAME={name}")]);
+        args.extend(["-e".into(), format!("GIT_COMMITTER_NAME={name}")]);
+    }
+
+    if let Some(ref email) = inputs.git_email {
+        args.extend(["-e".into(), format!("GIT_AUTHOR_EMAIL={email}")]);
+        args.extend(["-e".into(), format!("GIT_COMMITTER_EMAIL={email}")]);
+    }
+
+    match inputs.config.provider.as_str() {
+        "minimax" => {
+            args.extend([
+                "-e".into(),
+                "ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic".into(),
+                "-e".into(),
+                "ANTHROPIC_AUTH_TOKEN".into(),
+                "-e".into(),
+                "ANTHROPIC_MODEL=MiniMax-M2.5-highspeed".into(),
+                "-e".into(),
+                "ANTHROPIC_SMALL_FAST_MODEL=MiniMax-M2.5-highspeed".into(),
+                "-e".into(),
+                "ANTHROPIC_DEFAULT_SONNET_MODEL=MiniMax-M2.5-highspeed".into(),
+                "-e".into(),
+                "ANTHROPIC_DEFAULT_OPUS_MODEL=MiniMax-M2.5-highspeed".into(),
+                "-e".into(),
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL=MiniMax-M2.5-highspeed".into(),
+                "-e".into(),
+                "API_TIMEOUT_MS=3000000".into(),
+                "-e".into(),
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1".into(),
+            ]);
+        }
+        _ => {}
+    }
+
+    args.push(inputs.image.into());
+    args.push("__entrypoint".into());
+    args.extend_from_slice(inputs.extra_claude_args);
     args
 }
 
@@ -185,8 +251,23 @@ fn sanitise_name(folder: &str) -> String {
     }
 }
 
-fn parse_container_state(_docker_ps_output: &str) -> ContainerState {
-    let text = _docker_ps_output.trim();
+fn get_git_identity(key: &str) -> Option<String> {
+    Command::new("git")
+        .args(["config", "--get", key])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                (!s.is_empty()).then_some(s)
+            } else {
+                None
+            }
+        })
+}
+
+fn parse_container_state(docker_ps_output: &str) -> ContainerState {
+    let text = docker_ps_output.trim();
     if text.is_empty() {
         ContainerState::Missing
     } else if text.lines().any(|line| line.contains("\tUp ")) {
@@ -213,61 +294,58 @@ fn resolve_launch_plan(state: ContainerState, inputs: LaunchInputs<'_>) -> Launc
             LaunchPlan {
                 mode: LaunchMode::New,
                 container_name: container_name.clone(),
-                args: new_container_args(
-                    inputs.image,
-                    inputs.api_key,
-                    inputs.project_dir,
-                    &container_name,
-                    inputs.home,
-                    inputs.extra_claude_args,
-                ),
+                args: new_container_args(&inputs, &container_name),
             }
         }
     }
 }
 
-fn probe_container(_cname: &str) -> ContainerState {
-    let output = Command::new("docker")
+fn probe_container(backend: &str, cname: &str) -> ContainerState {
+    let output = Command::new(backend)
         .args([
             "ps",
             "-a",
             "--format",
             "{{.Names}}\t{{.Status}}",
             "--filter",
-            &format!("name=^{}$", _cname),
+            &format!("name=^{cname}$"),
         ])
         .output();
 
-    match output {
-        Ok(result) => parse_container_state(&String::from_utf8_lossy(&result.stdout)),
-        Err(_) => ContainerState::Missing,
-    }
+    output.map_or(ContainerState::Missing, |result| {
+        parse_container_state(&String::from_utf8_lossy(&result.stdout))
+    })
 }
 
-fn cmd_key_add(_name: &str, _key: Option<&str>) -> Result<()> {
-    let secret = match _key {
-        Some(key) => key.to_owned(),
-        None => {
-            eprint!("Enter ANTHROPIC_API_KEY for '{}': ", _name.cyan());
+fn cmd_key_add(name: &str, key: Option<&str>, provider: &str) -> Result<()> {
+    let secret_key = key.map_or_else(
+        || {
+            eprint!("Enter key for '{name}' (provider: {provider}): ");
             read_password()
-        }
-    };
+        },
+        std::borrow::ToOwned::to_owned,
+    );
 
-    if secret.trim().is_empty() {
-        bail!("API key cannot be empty");
+    if secret_key.trim().is_empty() {
+        bail!("Key cannot be empty");
     }
 
-    store_secret(_name, secret.trim())?;
-    register_profile(_name)?;
+    let config = ProfileConfig {
+        key: secret_key.trim().to_owned(),
+        provider: provider.to_owned(),
+    };
+    let secret_json = serde_json::to_string(&config).context("serialising config")?;
+    store_secret(name, &secret_json)?;
+    register_profile(name)?;
     println!(
         "{} Profile '{}' saved to system keychain.",
         "OK".green(),
-        _name.cyan()
+        name.cyan()
     );
     Ok(())
 }
 
-fn cmd_key_list() -> Result<()> {
+fn cmd_key_list() {
     let manifest = load_secret(MANIFEST_KEY).unwrap_or_default();
     let active = get_active().unwrap_or_default();
 
@@ -290,30 +368,34 @@ fn cmd_key_list() -> Result<()> {
         }
     }
     println!();
-    Ok(())
 }
 
-fn cmd_key_use(_name: &str) -> Result<()> {
-    load_secret(_name).with_context(|| {
-        format!("Profile '{_name}' not found. Add it: claude-dock key add {_name}")
+fn cmd_key_use(name: &str) -> Result<()> {
+    load_secret(name).with_context(|| {
+        format!("Profile '{name}' not found. Add it: claude-dock key add {name}")
     })?;
-    store_secret(ACTIVE_KEY, _name)?;
-    println!("{} Active profile -> '{}'", "OK".green(), _name.cyan());
+    store_secret(ACTIVE_KEY, name)?;
+    println!("{} Active profile -> '{}'", "OK".green(), name.cyan());
     Ok(())
 }
 
-fn cmd_key_remove(_name: &str) -> Result<()> {
-    delete_secret(_name)?;
+fn cmd_key_remove(name: &str) -> Result<()> {
+    delete_secret(name)?;
 
     let manifest = load_secret(MANIFEST_KEY).unwrap_or_default();
     let updated = manifest
         .split(',')
-        .filter(|profile| !profile.is_empty() && *profile != _name)
+        .filter(|profile| !profile.is_empty() && *profile != name)
         .collect::<Vec<_>>()
         .join(",");
-    store_secret(MANIFEST_KEY, &updated)?;
 
-    if get_active().unwrap_or_default() == _name {
+    if updated.is_empty() {
+        let _ = delete_secret(MANIFEST_KEY);
+    } else {
+        store_secret(MANIFEST_KEY, &updated)?;
+    }
+
+    if get_active().unwrap_or_default() == name {
         let _ = delete_secret(ACTIVE_KEY);
         println!(
             "{} That was the active profile. Set a new one: claude-dock key use <name>",
@@ -321,36 +403,17 @@ fn cmd_key_remove(_name: &str) -> Result<()> {
         );
     }
 
-    println!("{} Profile '{}' removed.", "OK".green(), _name.red());
+    println!("{} Profile '{}' removed.", "OK".green(), name.red());
     Ok(())
 }
 
-fn cmd_run(_image: &str, _profile: Option<&str>, _claude_args: &[String]) -> Result<()> {
-    which::which("docker").context("'docker' not found - is Docker installed and running?")?;
-
-    let profile_name = match _profile {
-        Some(profile) => profile.to_owned(),
-        None => get_active()?,
-    };
-
-    let api_key = load_secret(&profile_name)
-        .with_context(|| format!("Profile '{profile_name}' not found"))?;
-
-    let project_dir = std::env::current_dir().context("cannot read current directory")?;
-    let project_str = project_dir.to_string_lossy().into_owned();
-    let folder = project_dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string());
-    let container_base_name = sanitise_name(&folder);
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-
+fn print_banner(profile_name: &str, project_str: &str, image: &str) {
     println!();
     println!("  {}", "Claude Code  x  Docker".bold().bright_cyan());
     println!();
     println!("  {} {}", "Profile :".dimmed(), profile_name.cyan());
     println!("  {} {}", "Project :".dimmed(), project_str.yellow());
-    println!("  {} {}", "Image   :".dimmed(), _image.dimmed());
+    println!("  {} {}", "Image   :".dimmed(), image.dimmed());
     println!();
     println!("  {}", "What is Claude Code?".bold());
     println!("  Claude Code is an AI coding agent that lives in your terminal.");
@@ -388,17 +451,217 @@ fn cmd_run(_image: &str, _profile: Option<&str>, _claude_args: &[String]) -> Res
     );
     println!("  Type {} to leave the container entirely.", "exit".bold());
     println!();
+}
+
+fn setup_system_user(uid: &str, gid: &str) {
+    // Group/User creation - errors are tolerated if they already exist
+    let _ = Command::new("groupadd")
+        .args(["-g", gid, "claudegroup"])
+        .status();
+
+    let _ = Command::new("useradd")
+        .args([
+            "-u",
+            uid,
+            "-g",
+            gid,
+            "-d",
+            "/home/user",
+            "-s",
+            "/bin/bash",
+            "claudeuser",
+        ])
+        .status();
+
+    // Chown home (suppress errors for RO mounts)
+    let _ = Command::new("chown")
+        .args(["claudeuser:claudegroup", "/home/user"])
+        .status();
+
+    ["/.claude", "/.jj", "/.local", "/.local/bin"]
+        .iter()
+        .map(|dir| format!("/home/user{dir}"))
+        .filter(|path| std::path::Path::new(path).exists())
+        .for_each(|path| {
+            let _ = Command::new("chown")
+                .args(["-R", "claudeuser:claudegroup", &path])
+                .status();
+        });
+}
+
+fn setup_host_home_symlink() -> Result<()> {
+    let host_home = match std::env::var("HOST_HOME") {
+        Ok(val) if val != "/home/user" => val,
+        _ => return Ok(()),
+    };
+
+    let path = std::path::Path::new(&host_home);
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
+    }
+
+    if !path.exists() {
+        std::os::unix::fs::symlink("/home/user", path)
+            .with_context(|| format!("failed to symlink /home/user to {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn setup_claude_binary() -> Result<()> {
+    let local_bin = "/home/user/.local/bin";
+    let _ = std::fs::create_dir_all(local_bin);
+    let target_bin = format!("{local_bin}/claude");
+
+    // Force link the binary to ~/.local/bin/claude to satisfy "installMethod: native"
+    let sources = [
+        "/usr/local/bin/claude",
+        "/root/.local/bin/claude",
+        "/usr/bin/claude",
+    ];
+
+    if let Some(src) = sources.iter().find(|s| std::path::Path::new(s).exists()) {
+        if std::path::Path::new(&target_bin).exists() {
+            let _ = std::fs::remove_file(&target_bin);
+        }
+        std::os::unix::fs::symlink(src, &target_bin)
+            .with_context(|| format!("failed to symlink {src} to {target_bin}"))?;
+    }
+
+    let _ = Command::new("chown")
+        .args(["claudeuser:claudegroup", &target_bin])
+        .status();
+
+    Ok(())
+}
+
+fn cmd_internal_entrypoint(args: &[String]) -> Result<()> {
+    let uid = std::env::var("CONTAINER_USER_ID").unwrap_or_else(|_| "1000".to_string());
+    let gid = std::env::var("CONTAINER_GROUP_ID").unwrap_or_else(|_| "1000".to_string());
+
+    setup_system_user(&uid, &gid);
+    setup_host_home_symlink()?;
+    setup_claude_binary()?;
+
+    // 4. Exec via gosu
+    let mut exec_args = vec!["claudeuser".to_string()];
+    let mut actual_args = args.to_vec();
+
+    if actual_args.first().map(String::as_str) == Some("shell") {
+        actual_args.remove(0);
+        exec_args.push("/bin/bash".into());
+    } else {
+        // Use absolute path to avoid PATH issues
+        exec_args.push("/usr/local/bin/claude".into());
+    }
+    exec_args.extend(actual_args);
+
+    let err = Command::new("gosu").args(&exec_args).exec();
+    Err(err).context("exec gosu")
+}
+
+fn cmd_shell(image: &str, profile: Option<&str>, bash_args: &[String]) -> Result<()> {
+    let mut combined_args = vec!["shell".to_string()];
+    combined_args.extend_from_slice(bash_args);
+    cmd_run(image, profile, &combined_args)
+}
+
+fn cmd_config(image: &str) -> Result<()> {
+    let active = get_active().unwrap_or_else(|_| "none".to_string());
+    let project_dir = std::env::current_dir().context("cannot read current directory")?;
+    let host_home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+
+    println!("{}: {}", "Active Profile".bold(), active.cyan());
+    println!(
+        "{}: {}",
+        "Project Root  ".bold(),
+        project_dir.display().to_string().yellow()
+    );
+    println!("{}: {}", "Host Home     ".bold(), host_home.yellow());
+    println!("{}: {}", "Docker Image  ".bold(), image.dimmed());
+    println!();
+    println!("{}", "Container Environment:".bold());
+
+    if let Ok(config) = load_profile(&active) {
+        println!("  PROVIDER={}", config.provider);
+        match config.provider.as_str() {
+            "minimax" => println!("  ANTHROPIC_AUTH_TOKEN=[REDACTED]"),
+            "anthropic" => println!("  (Vanilla Install - No API keys injected)"),
+            _ => println!("  ANTHROPIC_API_KEY=[REDACTED]"),
+        }
+    }
+
+    let uid = Command::new("id").arg("-u").output().map_or_else(
+        |_| "1000".to_string(),
+        |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+    );
+    let gid = Command::new("id").arg("-g").output().map_or_else(
+        |_| "1000".to_string(),
+        |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+    );
+
+    println!("  CONTAINER_USER_ID={uid}");
+    println!("  CONTAINER_GROUP_ID={gid}");
+    Ok(())
+}
+
+fn cmd_run(image: &str, profile: Option<&str>, claude_args: &[String]) -> Result<()> {
+    let backend = if let Ok(be) = std::env::var("CLAUDE_BACKEND") {
+        be
+    } else if which::which("docker").is_ok() {
+        "docker".to_string()
+    } else if which::which("podman").is_ok() {
+        "podman".to_string()
+    } else {
+        bail!("'docker' or 'podman' not found - is a container engine installed and running?");
+    };
+
+    let profile_name = profile.map_or_else(get_active, |p| Ok(p.to_owned()))?;
+
+    let config = load_profile(&profile_name)
+        .with_context(|| format!("Profile '{profile_name}' not found"))?;
+
+    let project_dir = std::env::current_dir().context("cannot read current directory")?;
+    let project_str = project_dir.to_string_lossy().into_owned();
+    let folder = project_dir.file_name().map_or_else(
+        || "project".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let container_base_name = sanitise_name(&folder);
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+
+    let uid = Command::new("id").arg("-u").output().map_or_else(
+        |_| "1000".to_string(),
+        |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+    );
+
+    let gid = Command::new("id").arg("-g").output().map_or_else(
+        |_| "1000".to_string(),
+        |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+    );
+
+    print_banner(&profile_name, &project_str, image);
+
+    let git_name = get_git_identity("user.name");
+    let git_email = get_git_identity("user.email");
 
     let plan = resolve_launch_plan(
-        probe_container(&container_base_name),
+        probe_container(&backend, &container_base_name),
         LaunchInputs {
-            image: _image,
-            api_key: &api_key,
+            image,
+            config: &config,
             project_dir: &project_str,
             base_name: &container_base_name,
-            home: &home,
-            extra_claude_args: _claude_args,
+            host_home: &home,
+            uid: &uid,
+            gid: &gid,
+            extra_claude_args: claude_args,
             nonce: std::process::id(),
+            git_name,
+            git_email,
         },
     );
 
@@ -411,10 +674,25 @@ fn cmd_run(_image: &str, _profile: Option<&str>, _claude_args: &[String]) -> Res
         println!();
     }
 
-    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new(&backend);
+    cmd.args(&plan.args);
 
-    let err = Command::new("docker").args(&plan.args).exec();
-    Err(err).context("failed to exec docker")
+    // Set sensitive environment variables on the command itself to avoid leaking them in ps/logs
+    match config.provider.as_str() {
+        "minimax" => {
+            cmd.env("ANTHROPIC_AUTH_TOKEN", &config.key);
+        }
+        "anthropic" => {
+            // For anthropic, we don't pass any env vars, keeping it a "vanilla" install.
+            // The user can manage login/keys inside the container or via ~/.claude/settings.json.
+        }
+        _ => {
+            cmd.env("ANTHROPIC_API_KEY", &config.key);
+        }
+    }
+
+    let err = cmd.exec();
+    Err(err).context(format!("failed to exec {backend}"))
 }
 
 fn read_password() -> String {
@@ -440,11 +718,21 @@ fn main() -> Result<()> {
             claude_args,
         } => cmd_run(&cli.image, profile.as_deref(), &claude_args),
         Cmd::Key { action } => match action {
-            KeyAction::Add { name, key } => cmd_key_add(&name, key.as_deref()),
-            KeyAction::List => cmd_key_list(),
+            KeyAction::Add {
+                name,
+                key,
+                provider,
+            } => cmd_key_add(&name, key.as_deref(), &provider),
+            KeyAction::List => {
+                cmd_key_list();
+                Ok(())
+            }
             KeyAction::Use { name } => cmd_key_use(&name),
             KeyAction::Remove { name } => cmd_key_remove(&name),
         },
+        Cmd::Config => cmd_config(&cli.image),
+        Cmd::Shell { profile, bash_args } => cmd_shell(&cli.image, profile.as_deref(), &bash_args),
+        Cmd::InternalEntrypoint { args } => cmd_internal_entrypoint(&args),
     }
 }
 
@@ -454,35 +742,74 @@ mod contract_tests {
 
     #[test]
     fn new_container_args_launches_claude_with_forwarded_args() {
-        let args = new_container_args(
-            "ghcr.io/example/claude:latest",
-            "sk-ant-123",
-            "/tmp/project",
-            "claude-demo",
-            "/home/tester",
-            &["--dangerously-skip-permissions".into(), "--verbose".into()],
-        );
+        let config = ProfileConfig {
+            key: "sk-ant-123".into(),
+            provider: "anthropic".into(),
+        };
+        let extra_claude_args = ["--dangerously-skip-permissions".into(), "--verbose".into()];
+        let inputs = LaunchInputs {
+            image: "ghcr.io/example/claude:latest",
+            config: &config,
+            project_dir: "/tmp/project",
+            base_name: "claude-demo",
+            host_home: "/home/tester",
+            uid: "1000",
+            gid: "1000",
+            extra_claude_args: &extra_claude_args,
+            nonce: 42,
+            git_name: None,
+            git_email: None,
+        };
+        let args = new_container_args(&inputs, "claude-demo");
 
         assert_eq!(args[0], "run");
         assert_eq!(args[1], "-it");
         assert_eq!(args[2], "--rm");
         assert_eq!(args[3], "--name");
         assert_eq!(args[4], "claude-demo");
+        assert_eq!(args[5], "--entrypoint");
+        assert_eq!(args[6], "/usr/local/bin/claude-dock");
         assert!(args.contains(&"-v".into()) && args.contains(&"/tmp/project:/app".into()));
         assert!(
             args.contains(&"-v".into())
                 && args.contains(&"/home/tester/.claude:/home/user/.claude".into())
         );
-        let has_api_key = args.iter().position(|a| a == &"-e").map_or(false, |i| {
-            args.get(i + 1)
-                .map_or(false, |v| v.starts_with("ANTHROPIC_API_KEY="))
-        });
-        assert!(has_api_key);
-        assert!(args.iter().any(|a| a.starts_with("CONTAINER_USER_ID=")));
-        assert!(args.iter().any(|a| a.starts_with("CONTAINER_GROUP_ID=")));
+        // NO API KEY for vanilla anthropic
+        assert!(!args.contains(&"ANTHROPIC_API_KEY".into()));
+        assert!(args.contains(&"CONTAINER_USER_ID=1000".into()));
+        assert!(args.contains(&"CONTAINER_GROUP_ID=1000".into()));
         assert!(args.contains(&"ghcr.io/example/claude:latest".into()));
         assert!(args.contains(&"--dangerously-skip-permissions".into()));
         assert!(args.contains(&"--verbose".into()));
+    }
+
+    #[test]
+    fn new_container_args_supports_minimax_provider() {
+        let config = ProfileConfig {
+            key: "minimax-key".into(),
+            provider: "minimax".into(),
+        };
+        let inputs = LaunchInputs {
+            image: "ghcr.io/example/claude:latest",
+            config: &config,
+            project_dir: "/tmp/project",
+            base_name: "claude-demo",
+            host_home: "/home/tester",
+            uid: "1000",
+            gid: "1000",
+            extra_claude_args: &[],
+            nonce: 42,
+            git_name: None,
+            git_email: None,
+        };
+        let args = new_container_args(&inputs, "claude-demo");
+
+        assert!(args.contains(&"-e".into()));
+        assert!(args.contains(&"ANTHROPIC_AUTH_TOKEN".into()));
+        assert!(args.contains(&"ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic".into()));
+        assert!(args.contains(&"ANTHROPIC_MODEL=MiniMax-M2.5-highspeed".into()));
+        assert!(args.contains(&"API_TIMEOUT_MS=3000000".into()));
+        assert!(args.contains(&"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1".into()));
     }
 
     #[test]
@@ -527,16 +854,24 @@ mod contract_tests {
 
     #[test]
     fn resolve_launch_plan_resumes_stopped_container() {
+        let config = ProfileConfig {
+            key: "sk-ant-123".into(),
+            provider: "anthropic".into(),
+        };
         let plan = resolve_launch_plan(
             ContainerState::Stopped,
             LaunchInputs {
                 image: "ghcr.io/example/claude:latest",
-                api_key: "sk-ant-123",
+                config: &config,
                 project_dir: "/tmp/project",
                 base_name: "claude-demo",
-                home: "/home/tester",
+                host_home: "/home/tester",
+                uid: "1000",
+                gid: "1000",
                 extra_claude_args: &[],
                 nonce: 4242,
+                git_name: None,
+                git_email: None,
             },
         );
 
@@ -547,16 +882,24 @@ mod contract_tests {
 
     #[test]
     fn resolve_launch_plan_uses_base_name_for_missing_container() {
+        let config = ProfileConfig {
+            key: "sk-ant-123".into(),
+            provider: "anthropic".into(),
+        };
         let plan = resolve_launch_plan(
             ContainerState::Missing,
             LaunchInputs {
                 image: "ghcr.io/example/claude:latest",
-                api_key: "sk-ant-123",
+                config: &config,
                 project_dir: "/tmp/project",
                 base_name: "claude-demo",
-                home: "/home/tester",
+                host_home: "/home/tester",
+                uid: "1000",
+                gid: "1000",
                 extra_claude_args: &["--print".into()],
                 nonce: 4242,
+                git_name: None,
+                git_email: None,
             },
         );
 
@@ -568,22 +911,84 @@ mod contract_tests {
 
     #[test]
     fn resolve_launch_plan_avoids_name_collision_for_running_container() {
+        let config = ProfileConfig {
+            key: "sk-ant-123".into(),
+            provider: "anthropic".into(),
+        };
         let plan = resolve_launch_plan(
             ContainerState::Running,
             LaunchInputs {
                 image: "ghcr.io/example/claude:latest",
-                api_key: "sk-ant-123",
+                config: &config,
                 project_dir: "/tmp/project",
                 base_name: "claude-demo",
-                home: "/home/tester",
+                host_home: "/home/tester",
+                uid: "1000",
+                gid: "1000",
                 extra_claude_args: &[],
                 nonce: 4242,
+                git_name: None,
+                git_email: None,
             },
         );
 
         assert_eq!(plan.mode, LaunchMode::New);
         assert_eq!(plan.container_name, "claude-demo-4242");
         assert!(plan.args.contains(&"claude-demo-4242".to_string()));
+    }
+
+    #[test]
+    fn new_container_args_forwards_git_identity() {
+        let config = ProfileConfig {
+            key: "sk-ant-123".into(),
+            provider: "anthropic".into(),
+        };
+        let inputs = LaunchInputs {
+            image: "ghcr.io/example/claude:latest",
+            config: &config,
+            project_dir: "/tmp/project",
+            base_name: "claude-demo",
+            host_home: "/home/tester",
+            uid: "1000",
+            gid: "1000",
+            extra_claude_args: &[],
+            nonce: 42,
+            git_name: Some("Test User".into()),
+            git_email: Some("test@example.com".into()),
+        };
+        let args = new_container_args(&inputs, "claude-demo");
+
+        assert!(args.contains(&"GIT_AUTHOR_NAME=Test User".into()));
+        assert!(args.contains(&"GIT_AUTHOR_EMAIL=test@example.com".into()));
+        assert!(args.contains(&"GIT_COMMITTER_NAME=Test User".into()));
+        assert!(args.contains(&"GIT_COMMITTER_EMAIL=test@example.com".into()));
+    }
+
+    #[test]
+    fn new_container_args_anthropic_provider_injects_no_secrets() {
+        let config = ProfileConfig {
+            key: "sk-ant-123".into(),
+            provider: "anthropic".into(),
+        };
+        let inputs = LaunchInputs {
+            image: "ghcr.io/example/claude:latest",
+            config: &config,
+            project_dir: "/tmp/project",
+            base_name: "claude-demo",
+            host_home: "/home/tester",
+            uid: "1000",
+            gid: "1000",
+            extra_claude_args: &[],
+            nonce: 42,
+            git_name: None,
+            git_email: None,
+        };
+        let args = new_container_args(&inputs, "claude-demo");
+
+        // Should still contain infrastructure env vars like HOST_HOME, but NO Anthropic secrets
+        assert!(args.contains(&"HOST_HOME=/home/tester".into()));
+        assert!(!args.contains(&"ANTHROPIC_API_KEY".into()));
+        assert!(!args.contains(&"ANTHROPIC_AUTH_TOKEN".into()));
     }
 
     #[test]
