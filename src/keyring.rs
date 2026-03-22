@@ -136,7 +136,7 @@ pub fn cmd_key_use(name: &str) -> Result<()> {
 
 pub fn cmd_key_remove(name: &str) -> Result<()> {
     validate_profile_name(name)?;
-    delete_secret(name)?;
+    delete_secret(name).with_context(|| format!("Profile '{name}' does not exist"))?;
     let manifest = load_secret(MANIFEST_KEY).unwrap_or_default();
     let updated = manifest
         .split(',')
