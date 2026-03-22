@@ -154,6 +154,11 @@ fn new_container_args(inputs: &LaunchInputs<'_>, cname: &str) -> Vec<String> {
             "-it".into()
         },
         "--rm".into(),
+        // Bypass Docker's permission checks when host dirs are mounted.
+        // Required because we're running as root inside container but accessing
+        // user's host directories with their UID/GID. Without this flag,
+        // volume mounts with mixed ownership fail with "permission denied".
+        "--dangerously-skip-permissions".into(),
         "--name".into(),
         cname.into(),
         "--entrypoint".into(),

@@ -341,8 +341,9 @@ mod contract_tests {
         assert_eq!(args[0], "run");
         assert_eq!(args[1], "-it");
         assert_eq!(args[2], "--rm");
-        assert_eq!(args[3], "--name");
-        assert_eq!(args[4], "claude-demo");
+        assert_eq!(args[3], "--dangerously-skip-permissions");
+        assert_eq!(args[4], "--name");
+        assert_eq!(args[5], "claude-demo");
         assert!(args.contains(&"/tmp/project:/app".into()));
         assert!(args.contains(&"/home/tester/.claude:/home/user/.claude".into()));
         assert!(args.contains(&"/home/tester/.claude.json:/home/user/.claude.json".into()));
