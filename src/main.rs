@@ -21,13 +21,14 @@ const DEFAULT_IMAGE: &str = "claude-dock:latest";
 #[command(
     name = "claude-dock",
     about = "Launch Claude Code in Docker - automatically",
-    version
+    version,
+    subcommand_required = false
 )]
 struct Cli {
     #[arg(long, global = true, env = "CLAUDE_IMAGE", default_value = DEFAULT_IMAGE)]
     image: String,
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -79,12 +80,12 @@ fn print_banner(profile_name: &str, project_str: &str, image: &str) {
     println!("  {} {}", "Project :".dimmed(), project_str.yellow());
     println!("  {} {}", "Image   :".dimmed(), image.dimmed());
     println!();
-    println!("  {}", "What is Claude Code?".bold());
-    println!("  Claude Code is an AI coding agent that lives in your terminal.");
-    println!("  It reads your whole codebase, runs commands, edits files, and");
-    println!("  explains code - all through plain English conversation.");
+    println!("  {}", "Hello, gorgeous.".bold());
+    println!("  Claude Code is your containerized coding girl with a plan.");
+    println!("  She reads the codebase, runs commands, edits files, and");
+    println!("  helps you steer everything through plain English conversation.");
     println!();
-    println!("  {}", "How to use it:".bold());
+    println!("  {}", "Tell her what you want:".bold());
     println!(
         "    {} {}",
         ">".bright_cyan(),
@@ -107,7 +108,7 @@ fn print_banner(profile_name: &str, project_str: &str, image: &str) {
     );
     println!();
     println!(
-        "  Press {} to approve actions, {} to skip, {} to quit Claude Code.",
+        "  Press {} to approve actions, {} to skip, {} to leave the moment.",
         "y".bold(),
         "n".bold(),
         "Ctrl-C".bold()
@@ -234,14 +235,37 @@ fn cmd_run(image: &str, profile: Option<&str>, claude_args: &[String]) -> Result
     Err(err).context(format!("failed to exec {}", backend.binary_name()))
 }
 
+fn intercept_profile_shortcut() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        return None;
+    }
+    let first = &args[1];
+    let subcommands = ["run", "key", "config", "shell", "__entrypoint"];
+    if subcommands.contains(&first.as_str()) {
+        return None;
+    }
+    if first.starts_with('-') {
+        return None;
+    }
+    Some(first.clone())
+}
+
 fn main() -> Result<()> {
+    if let Some(profile_name) = intercept_profile_shortcut() {
+        cmd_key_use(&profile_name)?;
+        return cmd_run(DEFAULT_IMAGE, Some(&profile_name), &[]);
+    }
+
     let cli = Cli::parse();
+
     match cli.command {
-        Cmd::Run {
+        None => cmd_run(&cli.image, None, &[]),
+        Some(Cmd::Run {
             profile,
             claude_args,
-        } => cmd_run(&cli.image, profile.as_deref(), &claude_args),
-        Cmd::Key { action } => match action {
+        }) => cmd_run(&cli.image, profile.as_deref(), &claude_args),
+        Some(Cmd::Key { action }) => match action {
             KeyAction::Add {
                 name,
                 key,
@@ -254,13 +278,13 @@ fn main() -> Result<()> {
             KeyAction::Use { name } => cmd_key_use(&name),
             KeyAction::Remove { name } => cmd_key_remove(&name),
         },
-        Cmd::Config => cmd_config(&cli.image),
-        Cmd::Shell { profile, bash_args } => {
+        Some(Cmd::Config) => cmd_config(&cli.image),
+        Some(Cmd::Shell { profile, bash_args }) => {
             let mut combined = vec!["shell".to_string()];
             combined.extend_from_slice(&bash_args);
             cmd_run(&cli.image, profile.as_deref(), &combined)
         }
-        Cmd::InternalEntrypoint { args } => entrypoint::cmd_internal_entrypoint(&args),
+        Some(Cmd::InternalEntrypoint { args }) => entrypoint::cmd_internal_entrypoint(&args),
     }
 }
 

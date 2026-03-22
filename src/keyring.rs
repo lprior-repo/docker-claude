@@ -17,6 +17,16 @@ pub fn validate_profile_name(name: &str) -> Result<()> {
     if name.starts_with("__") || name.ends_with("__") {
         bail!("profile name cannot start or end with '__' (reserved for internal use)");
     }
+    let reserved = [
+        "run", "key", "config", "shell", "list", "add", "use", "remove",
+    ];
+    if reserved.contains(&name) {
+        bail!(
+            "profile name '{}' is reserved — choose another name\n  (reserved: {})",
+            name,
+            reserved.join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -178,4 +188,34 @@ pub enum KeyAction {
     Remove {
         name: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_profile_name_rejects_reserved_names() {
+        for name in [
+            "run", "key", "config", "shell", "list", "add", "use", "remove",
+        ] {
+            assert!(
+                validate_profile_name(name).is_err(),
+                "profile name '{name}' should be rejected as reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_profile_name_accepts_regular_names() {
+        assert!(validate_profile_name("glm1").is_ok());
+        assert!(validate_profile_name("minimax25").is_ok());
+        assert!(validate_profile_name("work").is_ok());
+    }
+
+    #[test]
+    fn validate_profile_name_rejects_empty_and_comma() {
+        assert!(validate_profile_name("").is_err());
+        assert!(validate_profile_name("foo,bar").is_err());
+    }
 }
