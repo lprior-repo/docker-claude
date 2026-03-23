@@ -53,7 +53,7 @@ pub fn get_active() -> Result<String> {
 }
 
 fn register_profile(name: &str) -> Result<()> {
-    let manifest = load_secret(MANIFEST_KEY).unwrap_or_default();
+    let manifest = load_secret(MANIFEST_KEY).unwrap_or_else(|_| String::new());
     let mut profiles: Vec<&str> = manifest.split(',').filter(|s| !s.is_empty()).collect();
     if !profiles.contains(&name) {
         profiles.push(name);
@@ -101,8 +101,8 @@ pub fn cmd_key_add(name: &str, key: Option<&str>, provider_str: &str) -> Result<
 }
 
 pub fn cmd_key_list() {
-    let manifest = load_secret(MANIFEST_KEY).unwrap_or_default();
-    let active = get_active().unwrap_or_default();
+    let manifest = load_secret(MANIFEST_KEY).unwrap_or_else(|_| String::new());
+    let active = get_active().unwrap_or_else(|_| String::new());
     println!();
     println!("{}", "Saved profiles:".bold());
     if manifest.is_empty() {
@@ -137,7 +137,7 @@ pub fn cmd_key_use(name: &str) -> Result<()> {
 pub fn cmd_key_remove(name: &str) -> Result<()> {
     validate_profile_name(name)?;
     delete_secret(name).with_context(|| format!("Profile '{name}' does not exist"))?;
-    let manifest = load_secret(MANIFEST_KEY).unwrap_or_default();
+    let manifest = load_secret(MANIFEST_KEY).unwrap_or_else(|_| String::new());
     let updated = manifest
         .split(',')
         .filter(|p| !p.is_empty() && *p != name)
@@ -148,7 +148,7 @@ pub fn cmd_key_remove(name: &str) -> Result<()> {
     } else {
         store_secret(MANIFEST_KEY, &updated)?;
     }
-    if get_active().unwrap_or_default() == name {
+    if get_active().unwrap_or_else(|_| String::new()) == name {
         let _ = delete_secret(ACTIVE_KEY);
         println!(
             "{} That was the active profile. Set a new one: claude-dock key use <name>",

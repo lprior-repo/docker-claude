@@ -1,0 +1,9 @@
+target/
+.git/
+.beads/
+.dolt/
+node_modules/
+*.md
+.gitignore
+.env*
+!.env.example
