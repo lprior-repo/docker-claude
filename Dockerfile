@@ -7,6 +7,7 @@ RUN pacman -Syu --noconfirm && \
     curl \
     git \
     perl \
+    llvm \
     && pacman -Scc --noconfirm
 
 ENV RUSTUP_VERSION=1.27.0
@@ -15,18 +16,28 @@ RUN curl -fsSL https://sh.rustup.rs -o /tmp/rustup-init && \
     sh /tmp/rustup-init -y --default-toolchain stable --profile minimal && \
     rm /tmp/rustup-init
 ENV PATH="/root/.cargo/bin:${PATH}"
+RUN rustup component add llvm-tools-preview
 
 RUN cargo install --locked cargo-expand && \
     cargo install --locked cargo-audit && \
     cargo install --locked cargo-flamegraph && \
     cargo install --locked cargo-watch && \
     cargo install --locked cargo-outdated && \
+    cargo install --locked cargo-mutants && \
+    cargo install --locked cargo-llvm-cov && \
+    cargo install --locked cargo-geiger && \
+    cargo install --locked tokei && \
+    cargo install --locked rust-code-analysis-cli && \
+    cargo install --locked cargo-udeps && \
+    cargo install --locked cargo-deny && \
+    cargo install --locked ast-grep && \
+    cargo install --locked sg && \
     cargo install --locked wasm-pack || \
     echo "WARNING: Some cargo tools failed to install (non-critical)"
 
 FROM archlinux:latest
 LABEL maintainer="claude-dock"
-LABEL description="Bleeding-edge Claude Code CLI on Arch + Bun + Rust + JJ + Dioxus"
+LABEL description="Bleeding-edge Claude Code CLI on Arch + Bun + Rust + Python + JJ + Dioxus"
 LABEL claude-dock="true"
 
 RUN pacman -Syu --noconfirm && \
@@ -49,12 +60,21 @@ RUN pacman -Syu --noconfirm && \
     nodejs \
     npm \
     go \
+    python \
+    python-pip \
+    python-setuptools \
+    python-wheel \
     icu \
     dolt \
     gnupg \
     pinentry \
     gosu \
     && pacman -Scc --noconfirm
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:/root/.cargo/bin:/root/go/bin:${PATH}"
+
+RUN uv --version && python3 --version
 
 ENV DELTA_VERSION=0.18.1
 RUN ARCH=$(uname -m) && \
@@ -71,7 +91,6 @@ RUN ARCH=$(uname -m) && \
 
 COPY --from=builder /root/.cargo/bin /root/.cargo/bin
 COPY --from=builder /root/.rustup /root/.rustup
-ENV PATH="/root/.cargo/bin:/root/go/bin:${PATH}"
 RUN rustc --version && cargo --version
 
 RUN npm install -g playwright && \
