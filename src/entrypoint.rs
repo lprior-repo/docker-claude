@@ -85,6 +85,7 @@ pub fn cmd_internal_entrypoint(args: &[String]) -> anyhow::Result<()> {
         exec_args.push("/bin/bash".into());
     } else {
         exec_args.push("/usr/local/bin/claude".into());
+        exec_args.push("--dangerously-skip-permissions".into());
     }
     exec_args.extend(actual_args);
     let err = Command::new("gosu").args(&exec_args).exec();

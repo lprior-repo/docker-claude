@@ -33,13 +33,14 @@ RUN pacman -Syu --noconfirm && \
     && pacman -Scc --noconfirm
 
 # =============================================================================
-# STEP 2: delta - git diff viewer (not in Arch repos)
+# STEP 2: delta & gosu
 # =============================================================================
 ENV DELTA_VERSION=0.18.1
+ENV GOSU_VERSION=1.17
 RUN ARCH=$(uname -m) && \
     case "$ARCH" in \
-        x86_64) DELTA_ARCH=x86_64-unknown-linux-musl ;; \
-        aarch64) DELTA_ARCH=aarch64-unknown-linux-musl ;; \
+        x86_64) DELTA_ARCH=x86_64-unknown-linux-musl; GOSU_ARCH=amd64 ;; \
+        aarch64) DELTA_ARCH=aarch64-unknown-linux-musl; GOSU_ARCH=arm64 ;; \
         *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
     esac && \
     curl -fsSL "https://github.com/dandavison/delta/releases/download/$DELTA_VERSION/delta-$DELTA_VERSION-$DELTA_ARCH.tar.gz" -o /tmp/delta.tar.gz && \
@@ -47,7 +48,10 @@ RUN ARCH=$(uname -m) && \
     mv /tmp/delta-$DELTA_VERSION-$DELTA_ARCH/delta /usr/local/bin/ && \
     chmod +x /usr/local/bin/delta && \
     rm -rf /tmp/delta.tar.gz /tmp/delta-$DELTA_VERSION-$DELTA_ARCH && \
-    delta --version
+    delta --version && \
+    curl -fsSL "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$GOSU_ARCH" -o /usr/local/bin/gosu && \
+    chmod +x /usr/local/bin/gosu && \
+    gosu --version
 
 # =============================================================================
 # STEP 3: Rust toolchain via rustup
