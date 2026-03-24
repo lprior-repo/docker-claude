@@ -436,6 +436,8 @@ fn new_container_args(inputs: &LaunchInputs<'_>, cname: &str) -> Vec<String> {
         "run",
         if uses_noninteractive { "-i" } else { "-it" },
         "--rm",
+        "--network",
+        "host",
         "--name",
         cname,
         "--entrypoint",
