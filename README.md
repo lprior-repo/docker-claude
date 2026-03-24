@@ -147,13 +147,14 @@ claude-dock clean               # Remove all containers and prune stale volumes
 | `--gpus` | GPU passthrough |
 | `--host-access` | Allow container to reach host network (host.docker.internal) |
 | `--no-cache` | Use tmpfs for build dirs instead of persistent volumes |
+| `--no-env` | Skip auto-loading `.env` file from project directory |
 
 ## Mounts
 
 **Project & config (bind mounts):**
 
 - project directory → `/app` (only writable persistent path)
-- `~/.claude` → `/home/user/.claude:ro` (with tmpfs overlay for claude's own writes)
+- `~/.claude` → `/home/user/.claude` (writable — Claude writes sessions/hooks here)
 - `~/.claude.json` → `/home/user/.claude.json:ro`
 - `~/.gitconfig` → `/home/user/.gitconfig:ro`
 - `~/.jj` → `/home/user/.jj:ro`
@@ -184,22 +185,21 @@ claude-dock clean               # Remove all containers and prune stale volumes
 
 - `/tmp` (500m), `/run` (10m)
 - `~/.local` (500m), `~/.gnupg` (10m), `~/.config` (10m), `~/.cache` (500m)
-- `~/.claude` (50m)
 
 ## Security Notes
 
 - API keys stored in system keyring, not on disk
 - Root filesystem is `--read-only`
 - All Linux capabilities dropped (`--cap-drop ALL`), `no-new-privileges: true`
-- Container runs as host user via `-u uid:gid` (not root + gosu)
+- Container runs as host user via gosu (uid/gid passed via env vars)
 - Memory capped at 8g (swap=memory, no host swap thrashing), PID limit 512
 - SSH private keys never mounted — authentication uses agent forwarding
-- SSH config `IdentityFile` directives stripped before mounting
+- SSH config dangerous directives stripped before mounting (IdentityFile, ProxyCommand, Include, LocalCommand, RemoteCommand, Match)
 - `.git-credentials` is not mounted
-- Config files mounted read-only; `.claude` has tmpfs overlay for claude's writes
+- Config files mounted read-only; `.claude` mounted writable for session data
 - `--dangerously-skip-permissions` is not used — approval prompts are active
 - `host.docker.internal` off by default (opt-in via `--host-access`)
-- Extra mount validation rejects `/`, `/root`, `/etc`, `/var`, `/usr`, `/proc`, `/dev`, `/sys`, `/bin`, `/lib`
+- Extra mount validation rejects `/`, `/root`, `/etc`, `/var`, `/usr`, `/proc`, `/dev`, `/sys`, `/bin`, `/lib`, `/home`, `/opt`, `/tmp`
 - Port validation rejects privileged ports (1-1023)
 - `--no-cache` mode uses tmpfs for build artifacts (no persistence)
 - Multi-stage Dockerfile (build tools not in final image)

@@ -26,6 +26,7 @@ pub(crate) fn validate_mount(mount: &str) -> Result<()> {
     let host_path = parts[0];
     let dangerous = [
         "/", "/root", "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/sys", "/dev", "/proc",
+        "/home", "/opt", "/tmp",
     ];
     for d in &dangerous {
         if host_path == *d || host_path.starts_with(&format!("{d}/")) {
@@ -62,14 +63,25 @@ pub(crate) fn ssh_config_path(host_home: &str) -> Option<String> {
         .filter(|line| {
             let trimmed = line.trim().to_lowercase();
             !trimmed.starts_with("identityfile")
+                && !trimmed.starts_with("proxycommand")
+                && !trimmed.starts_with("proxyjump")
+                && !trimmed.starts_with("include")
+                && !trimmed.starts_with("localcommand")
+                && !trimmed.starts_with("permitlocalcommand")
+                && !trimmed.starts_with("remotecommand")
+                && !trimmed.starts_with("match")
         })
         .collect::<Vec<_>>()
         .join("\n");
     if sanitized.trim().is_empty() {
         return None;
     }
-    let tmp = format!("/tmp/claude-dock-ssh-config-{host_home}.conf");
-    let _ = std::fs::write(&tmp, sanitized);
+    let safe_name = host_home.replace('/', "_");
+    let tmp = format!("/tmp/claude-dock-ssh-config-{safe_name}.conf");
+    if let Err(e) = std::fs::write(&tmp, &sanitized) {
+        eprintln!("WARN: failed to write sanitized SSH config: {e}");
+        return None;
+    }
     Some(tmp)
 }
 

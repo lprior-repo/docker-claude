@@ -54,6 +54,8 @@ enum Cmd {
         host_access: bool,
         #[arg(long = "no-cache")]
         no_cache: bool,
+        #[arg(long = "no-env")]
+        no_env: bool,
         #[arg(last = true)]
         claude_args: Vec<String>,
     },
@@ -71,6 +73,8 @@ enum Cmd {
         extra_mounts: Vec<String>,
         #[arg(long = "host-access")]
         host_access: bool,
+        #[arg(long = "no-env")]
+        no_env: bool,
         #[arg(last = true)]
         bash_args: Vec<String>,
     },
@@ -191,7 +195,7 @@ fn cmd_config(image: &str) -> Result<()> {
             |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
         );
 
-    println!("  UID={uid} GID={gid}");
+    println!("  UID={uid} GID={gid} (via gosu inside container)");
     println!();
     println!("{}", "Security:".bold());
     println!("  --read-only root filesystem");
@@ -218,6 +222,7 @@ fn cmd_run(
     gpus: bool,
     host_access: bool,
     no_cache: bool,
+    no_env: bool,
 ) -> Result<()> {
     let backend = detect_backend()?;
     let profile_name = profile.map_or_else(get_active, |p| Ok(p.to_owned()))?;
@@ -268,6 +273,8 @@ fn cmd_run(
         cpus,
         host_access,
         no_cache,
+        no_env,
+        gpus,
         nonce: std::process::id(),
         git_name: git_name.as_deref(),
         git_email: git_email.as_deref(),
@@ -286,10 +293,6 @@ fn cmd_run(
 
     let mut cmd = std::process::Command::new(backend.binary_name());
     cmd.args(&plan.args);
-
-    if gpus {
-        cmd.args(["--gpus", "all"]);
-    }
 
     if config.provider.needs_auth_token() {
         cmd.env("ANTHROPIC_AUTH_TOKEN", &config.key);
@@ -338,13 +341,26 @@ fn main() -> Result<()> {
             false,
             false,
             false,
+            false,
         );
     }
 
     let cli = Cli::parse();
 
     match cli.command {
-        None => cmd_run(&cli.image, None, &[], &[], &[], "", "", false, false, false),
+        None => cmd_run(
+            &cli.image,
+            None,
+            &[],
+            &[],
+            &[],
+            "",
+            "",
+            false,
+            false,
+            false,
+            false,
+        ),
         Some(Cmd::Run {
             profile,
             ports,
@@ -354,6 +370,7 @@ fn main() -> Result<()> {
             gpus,
             host_access,
             no_cache,
+            no_env,
             claude_args,
         }) => cmd_run(
             &cli.image,
@@ -366,6 +383,7 @@ fn main() -> Result<()> {
             gpus,
             host_access,
             no_cache,
+            no_env,
         ),
         Some(Cmd::Key { action }) => match action {
             KeyAction::Add {
@@ -386,6 +404,7 @@ fn main() -> Result<()> {
             ports,
             extra_mounts,
             host_access,
+            no_env,
             bash_args,
         }) => {
             let mut combined = vec!["shell".to_string()];
@@ -401,6 +420,7 @@ fn main() -> Result<()> {
                 false,
                 host_access,
                 false,
+                no_env,
             )
         }
         Some(Cmd::Stop { name }) => {
@@ -424,3 +444,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod contract_tests;
+#[cfg(test)]
+mod security_tests;
+#[cfg(test)]
+mod validation_tests;
