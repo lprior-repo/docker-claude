@@ -172,7 +172,7 @@ fn security_args() -> Vec<String> {
 fn resource_args(memory: &str, cpus: &str) -> Vec<String> {
     let effective = if memory.is_empty() {
         "8g"
-    } else if memory == "0" || memory.parse::<u64>().map_or(false, |v| v < 1_073_741_824) {
+    } else if memory == "0" || memory.parse::<u64>().is_ok_and(|v| v < 1_073_741_824) {
         "1g"
     } else {
         memory

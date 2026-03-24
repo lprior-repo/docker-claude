@@ -203,8 +203,9 @@ fn cmd_config(image: &str) -> Result<()> {
     println!("  --memory 8g (default, claude OOMs itself not your host)");
     println!("  --pids-limit 512");
     println!("  --security-opt no-new-privileges");
-    println!("  -u {uid}:{gid} (runs as your user, not root)");
-    println!("  Config mounts read-only (.claude, .jj, .gitconfig)");
+    println!("  UID={uid} GID={gid} (via gosu inside container)");
+    println!("  Config mounts read-only (.jj, .gitconfig, .claude.json)");
+    println!("  .claude mounted writable (Claude writes sessions/hooks)");
     println!("  No --dangerously-skip-permissions (approval prompts active)");
     println!("  host.docker.internal: off by default (use --host-access)");
     Ok(())
