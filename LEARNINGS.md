@@ -41,23 +41,14 @@ Thousands of `chown: changing ownership of '/home/user/...': Operation not permi
 
 **File**: `src/entrypoint.rs`
 
-#### 6. TTY Not Attached in Interactive Mode
-When running `claude-dock glm1` interactively, Claude Code would hang because the exec'd process didn't have proper TTY attachment.
+#### 6. Claude Code Hangs in Interactive Mode (The `.claude.json` Issue)
+When running `claude-dock glm1` interactively, Claude Code would hang indefinitely without showing the prompt.
 
-**Fix**: Added `libc::setsid()` call before exec to create a new session and properly attach to the controlling terminal.
+**Root Cause**: Through `strace`, we discovered Claude tries to write to or lock `.claude.json` on startup. Because `.claude.json` was mounted with `:ro` (read-only) and the root filesystem is also `--read-only`, Claude would get `EACCES` or `EROFS` when trying to manage its configuration, causing it to fall into an infinite retry loop or lockup.
 
-**File**: `src/entrypoint.rs`
+**Fix**: Changed the bind mount in `src/container.rs` to mount `.claude.json` read/write (removed `:ro`).
 
-### Verified Working
-
-```bash
-# Non-interactive (works):
-claude-dock glm1 -- claude --version
-# Output: 2.1.81 (Claude Code)
-
-# Interactive (may work now with setsid fix - untestable in CI):
-claude-dock glm1
-```
+**File**: `src/container.rs`
 
 ### Security Model Change
 
@@ -73,6 +64,6 @@ claude-dock glm1
 ### Files Modified
 
 - `src/main.rs` - Profile shortcut args extraction
-- `src/container.rs` - Non-interactive mode detection, TTY flag handling
-- `src/entrypoint.rs` - Removed user switching, removed chown calls, added setsid
+- `src/container.rs` - Non-interactive mode detection, TTY flag handling, removed `:ro` on `.claude.json`
+- `src/entrypoint.rs` - Removed user switching, removed chown calls, added setsid, fixed shell arg forwarding
 - `Cargo.toml` - Added `libc` dependency

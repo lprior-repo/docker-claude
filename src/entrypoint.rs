@@ -3,10 +3,6 @@ use std::process::Command;
 
 use anyhow::Context;
 
-unsafe fn make_session_leader() {
-    libc::setsid();
-}
-
 pub fn setup_system_user(_uid: &str, _gid: &str) {
     let _user_claude_exists = Command::new("id")
         .args(["claudeuser"])
@@ -118,7 +114,9 @@ pub fn cmd_internal_entrypoint(args: &[String]) -> anyhow::Result<()> {
         actual_args.remove(0);
     }
     let cmd_args: Vec<String> = if shell_mode {
-        vec!["/bin/zsh".to_string()]
+        let mut zsh_cmd = vec!["/bin/zsh".to_string()];
+        zsh_cmd.extend(actual_args);
+        zsh_cmd
     } else if actual_args.first().map(String::as_str) == Some("claude") {
         actual_args.remove(0);
         let mut claude_cmd = vec!["/usr/local/bin/claude".to_string()];
@@ -129,8 +127,13 @@ pub fn cmd_internal_entrypoint(args: &[String]) -> anyhow::Result<()> {
         claude_cmd.extend(actual_args);
         claude_cmd
     };
-    unsafe { make_session_leader() };
+    eprintln!(
+        "executing inside container: {} {:?}",
+        cmd_args[0],
+        &cmd_args[1..]
+    );
     let err = Command::new(&cmd_args[0]).args(&cmd_args[1..]).exec();
+    eprintln!("exec failed: {}", err);
     Err(err).context("exec")
 }
 

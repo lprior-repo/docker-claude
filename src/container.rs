@@ -254,10 +254,7 @@ fn bind_mounts(inputs: &LaunchInputs<'_>) -> Vec<String> {
     let base_mounts: Vec<String> = vec![
         format!("{}:/app", inputs.project_dir),
         format!("{}/.claude:/home/user/.claude", inputs.host_home),
-        format!(
-            "{}/.claude.json:/home/user/.claude.json:ro",
-            inputs.host_home
-        ),
+        format!("{}/.claude.json:/home/user/.claude.json", inputs.host_home),
         format!("{}/.gitconfig:/home/user/.gitconfig:ro", inputs.host_home),
         format!("{}/.jj:/home/user/.jj:ro", inputs.host_home),
     ];
