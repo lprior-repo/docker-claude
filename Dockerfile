@@ -68,7 +68,7 @@ RUN pacman -Syu --noconfirm && \
     dolt \
     gnupg \
     pinentry \
-    gosu \
+    sudo \
     && pacman -Scc --noconfirm
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -129,11 +129,13 @@ RUN curl -fsSL https://claude.ai/install.sh | bash && \
     claude --version
 
 RUN mkdir -p /app /home/user/.ssh /home/user/.config /home/user/.local /home/user/.cache /home/user/.gnupg && \
-    chown -R root:root /home/user && \
-    chmod 755 /home/user
+    chmod 755 /home/user && \
+    groupadd -g 1000 claudegroup && \
+    useradd -u 1000 -g 1000 -d /home/user -s /bin/zsh claudeuser && \
+    chown -R claudeuser:claudegroup /home/user
 
 WORKDIR /app
-COPY target/release/claude-dock /usr/local/bin/claude-dock
+COPY bin/claude-dock /usr/local/bin/claude-dock
 RUN chmod +x /usr/local/bin/claude-dock
 
 ENTRYPOINT ["/usr/local/bin/claude-dock", "__entrypoint"]

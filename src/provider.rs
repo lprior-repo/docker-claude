@@ -58,7 +58,7 @@ impl Provider {
 
 pub const API_TIMEOUT: &str = "3000000";
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ProfileConfig {
     pub key: String,
     pub provider: Provider,

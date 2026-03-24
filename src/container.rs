@@ -426,14 +426,18 @@ fn container_env_args(inputs: &LaunchInputs<'_>) -> Vec<String> {
 }
 
 fn new_container_args(inputs: &LaunchInputs<'_>, cname: &str) -> Vec<String> {
-    let uses_print_mode = inputs
-        .extra_claude_args
-        .iter()
-        .any(|arg| arg == "-p" || arg == "--print");
+    let uses_noninteractive = inputs.extra_claude_args.iter().any(|arg| {
+        arg == "-p"
+            || arg == "--print"
+            || arg == "--version"
+            || arg == "-v"
+            || arg == "--help"
+            || arg == "-h"
+    });
 
     let header: Vec<String> = [
         "run",
-        if uses_print_mode { "-i" } else { "-it" },
+        if uses_noninteractive { "-i" } else { "-it" },
         "--rm",
         "--name",
         cname,

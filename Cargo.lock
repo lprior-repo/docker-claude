@@ -112,6 +112,7 @@ dependencies = [
  "clap",
  "colored",
  "keyring",
+ "libc",
  "serde",
  "serde_json",
  "which",

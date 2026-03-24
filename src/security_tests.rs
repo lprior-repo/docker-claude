@@ -19,10 +19,10 @@ fn make_inputs<'a>(config: &'a ProfileConfig, extra: &'a [String]) -> LaunchInpu
         extra_mounts: &[],
         memory: "",
         cpus: "",
-        host_access: false,
-        no_cache: false,
-        no_env: false,
-        gpus: false,
+        host_access: crate::container::HostAccess::Disabled,
+        cache: crate::container::CacheMode::Persistent,
+        env: crate::container::EnvMode::Loaded,
+        gpus: crate::container::GpuMode::None,
         nonce: 42,
         git_name: None,
         git_email: None,
@@ -300,7 +300,7 @@ fn security_anthropic_provider_never_exposes_keys() {
 fn security_no_env_prevents_env_file_leak() {
     let config = minimax_config();
     let mut inputs = make_inputs(&config, &[]);
-    inputs.no_env = true;
+    inputs.env = crate::container::EnvMode::Skipped;
     let args = build_container_args(&inputs, "test");
     assert!(
         !args.iter().any(|a| a.contains("--env-file")),
@@ -453,7 +453,7 @@ fn security_jj_always_readonly() {
 fn security_resume_does_not_bypass_security() {
     let config = anthropic_config();
     let inputs = make_inputs(&config, &[]);
-    let plan = resolve_launch_plan(ContainerState::Stopped, inputs);
+    let plan = resolve_launch_plan(ContainerState::Stopped, &inputs);
     assert_eq!(plan.mode, crate::container::LaunchMode::Resume);
     let resume_args = plan.args.join(" ");
     assert!(

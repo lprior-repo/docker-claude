@@ -1,39 +1,60 @@
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 pub(crate) fn validate_port(port: &str) -> Result<()> {
     if port.is_empty() {
         bail!("empty port specification");
     }
-    let parts: Vec<&str> = port.split(':').collect();
-    let container_port = parts.last().unwrap_or(&parts[0]);
-    let container_port = container_port.split('/').next().unwrap_or(container_port);
-    let port_num: u16 = container_port
-        .parse()
-        .with_context(|| format!("invalid port number in '{port}'"))?;
-    if (1..=1023).contains(&port_num) {
-        bail!("privileged container port rejected: '{port}' — ports 1-1023 are not allowed");
+    port.split(':').try_for_each(|segment| {
+        let port_str = segment.split('/').next().map_or(segment, |s| s);
+        let port_num: u16 = port_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid port number in '{port}'"))?;
+        if (0..=1023).contains(&port_num) {
+            bail!("privileged port rejected: '{port}' — ports 0-1023 are not allowed");
+        }
+        Ok(())
+    })
+}
+
+fn normalize_path(path: &str) -> String {
+    let components: Vec<&str> =
+        path.split('/')
+            .filter(|p| !p.is_empty() && *p != ".")
+            .fold(Vec::new(), |mut acc, part| {
+                if part == ".." {
+                    acc.pop();
+                } else {
+                    acc.push(part);
+                }
+                acc
+            });
+    if components.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", components.join("/"))
     }
-    Ok(())
 }
 
 pub(crate) fn validate_mount(mount: &str) -> Result<()> {
+    const DANGEROUS: &[&str] = &[
+        "/", "/root", "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/sys", "/dev", "/proc",
+        "/home", "/opt", "/tmp",
+    ];
     let parts: Vec<&str> = mount.split(':').collect();
     if parts.len() < 2 {
         bail!("invalid mount format: {mount}");
     }
-    let host_path = parts[0];
-    let dangerous = [
-        "/", "/root", "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/sys", "/dev", "/proc",
-        "/home", "/opt", "/tmp",
-    ];
-    for d in &dangerous {
-        if host_path == *d || host_path.starts_with(&format!("{d}/")) {
-            bail!(
-                "dangerous mount rejected: '{mount}' — host system directory mount is not allowed"
-            );
-        }
+    if parts[0].is_empty() {
+        bail!("invalid mount format: empty host path in '{mount}'");
+    }
+    let host_path = normalize_path(parts[0]);
+    if DANGEROUS
+        .iter()
+        .any(|d| host_path == **d || host_path.starts_with(&format!("{d}/")))
+    {
+        bail!("dangerous mount rejected: '{mount}' — host system directory mount is not allowed");
     }
     Ok(())
 }
@@ -54,22 +75,29 @@ pub(crate) fn ssh_config_path(host_home: &str) -> Option<String> {
     if !Path::new(&src).is_file() {
         return None;
     }
-    let content = match std::fs::read_to_string(&src) {
-        Ok(c) => c,
-        Err(_) => return None,
+    let Ok(content) = std::fs::read_to_string(&src) else {
+        return None;
     };
+    let stripped = [
+        "identityfile",
+        "proxycommand",
+        "proxyjump",
+        "include",
+        "localcommand",
+        "permitlocalcommand",
+        "remotecommand",
+        "match",
+        "forwardagent",
+        "sendenv",
+        "setenv",
+        "certificatefile",
+        "pkcs11provider",
+    ];
     let sanitized: String = content
         .lines()
         .filter(|line| {
             let trimmed = line.trim().to_lowercase();
-            !trimmed.starts_with("identityfile")
-                && !trimmed.starts_with("proxycommand")
-                && !trimmed.starts_with("proxyjump")
-                && !trimmed.starts_with("include")
-                && !trimmed.starts_with("localcommand")
-                && !trimmed.starts_with("permitlocalcommand")
-                && !trimmed.starts_with("remotecommand")
-                && !trimmed.starts_with("match")
+            stripped.iter().all(|d| !trimmed.starts_with(*d))
         })
         .collect::<Vec<_>>()
         .join("\n");

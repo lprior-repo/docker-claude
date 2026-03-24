@@ -21,10 +21,10 @@ fn make_inputs<'a>(config: &'a ProfileConfig, extra: &'a [String]) -> LaunchInpu
         extra_mounts: &[],
         memory: "",
         cpus: "",
-        host_access: false,
-        no_cache: false,
-        no_env: false,
-        gpus: false,
+        host_access: crate::container::HostAccess::Disabled,
+        cache: crate::container::CacheMode::Persistent,
+        env: crate::container::EnvMode::Loaded,
+        gpus: crate::container::GpuMode::None,
         nonce: 42,
         git_name: None,
         git_email: None,
@@ -128,7 +128,7 @@ fn probe_missing_container() {
 fn resume_stopped_container() {
     let config = anthropic_config();
     let inputs = make_inputs(&config, &[]);
-    let plan = resolve_launch_plan(ContainerState::Stopped, inputs);
+    let plan = resolve_launch_plan(ContainerState::Stopped, &inputs);
     assert_eq!(plan.mode, crate::container::LaunchMode::Resume);
     assert_eq!(plan.container_name, "claude-demo");
 }
@@ -138,7 +138,7 @@ fn new_container_for_missing() {
     let config = anthropic_config();
     let extra = ["--print".to_string()];
     let inputs = make_inputs(&config, &extra);
-    let plan = resolve_launch_plan(ContainerState::Missing, inputs);
+    let plan = resolve_launch_plan(ContainerState::Missing, &inputs);
     assert_eq!(plan.mode, crate::container::LaunchMode::New);
     assert_eq!(plan.container_name, "claude-demo");
     assert_eq!(plan.args.last().map(String::as_str), Some("--print"));
@@ -148,7 +148,7 @@ fn new_container_for_missing() {
 fn suffixed_name_for_running_container() {
     let config = anthropic_config();
     let inputs = make_inputs(&config, &[]);
-    let plan = resolve_launch_plan(ContainerState::Running, inputs);
+    let plan = resolve_launch_plan(ContainerState::Running, &inputs);
     assert_eq!(plan.container_name, "claude-demo-42");
 }
 
@@ -187,7 +187,7 @@ fn named_cache_volumes_by_default() {
 fn no_cache_uses_tmpfs() {
     let config = anthropic_config();
     let mut inputs = make_inputs(&config, &[]);
-    inputs.no_cache = true;
+    inputs.cache = crate::container::CacheMode::Ephemeral;
     let args = build_container_args(&inputs, "claude-demo");
     assert!(args.iter().any(|a| a == "/app/target:size=2g"));
     assert!(!args
@@ -334,6 +334,18 @@ fn validate_port_rejects_privileged() {
 }
 
 #[test]
+fn validate_port_rejects_port_zero() {
+    assert!(validate_port_for_test("0:3000").is_err());
+    assert!(validate_port_for_test("3000:0").is_err());
+}
+
+#[test]
+fn validate_port_rejects_privileged_host_port() {
+    assert!(validate_port_for_test("22:3000").is_err());
+    assert!(validate_port_for_test("80:8080").is_err());
+}
+
+#[test]
 fn validate_mount_rejects_root() {
     assert!(validate_mount_for_test("/:/host").is_err());
 }
@@ -375,6 +387,28 @@ fn validate_mount_allows_safe() {
 }
 
 #[test]
+fn validate_mount_rejects_empty_host_path() {
+    assert!(validate_mount_for_test(":/tmp/gpg-agent.sock").is_err());
+    assert!(validate_mount_for_test(":/container/path").is_err());
+}
+
+#[test]
 fn validate_mount_rejects_root_subdir() {
     assert!(validate_mount_for_test("/root/.ssh:/root/.ssh:ro").is_err());
+}
+
+#[test]
+fn validate_mount_rejects_path_traversal_to_etc() {
+    assert!(validate_mount_for_test("/data/../../etc:/etc:ro").is_err());
+    assert!(validate_mount_for_test("/srv/../root:/root:ro").is_err());
+}
+
+#[test]
+fn validate_mount_rejects_deep_path_traversal() {
+    assert!(validate_mount_for_test("/workspace/../../../etc/passwd:/etc/passwd:ro").is_err());
+}
+
+#[test]
+fn validate_mount_rejects_traversal_to_home() {
+    assert!(validate_mount_for_test("/mnt/../home/other:/home/other:ro").is_err());
 }

@@ -12,7 +12,7 @@ use colored::Colorize;
 
 use container::{
     cmd_cleanup, cmd_ps, cmd_stop, detect_backend, probe_container, resolve_launch_plan,
-    sanitise_project_name, LaunchInputs,
+    sanitise_project_name, CacheMode, EnvMode, GpuMode, HostAccess, LaunchInputs,
 };
 use keyring::{
     cmd_key_add, cmd_key_list, cmd_key_remove, cmd_key_use, get_active, load_profile, KeyAction,
@@ -211,23 +211,26 @@ fn cmd_config(image: &str) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn cmd_run(
-    image: &str,
-    profile: Option<&str>,
-    claude_args: &[String],
-    ports: &[String],
-    extra_mounts: &[String],
-    memory: &str,
-    cpus: &str,
-    gpus: bool,
-    host_access: bool,
-    no_cache: bool,
-    no_env: bool,
-) -> Result<()> {
+struct RunConfig<'a> {
+    image: &'a str,
+    profile: Option<&'a str>,
+    claude_args: &'a [String],
+    ports: &'a [String],
+    extra_mounts: &'a [String],
+    memory: &'a str,
+    cpus: &'a str,
+    host_access: HostAccess,
+    cache: CacheMode,
+    env: EnvMode,
+    gpus: GpuMode,
+}
+
+fn cmd_run(config: &RunConfig<'_>) -> Result<()> {
     let backend = detect_backend()?;
-    let profile_name = profile.map_or_else(get_active, |p| Ok(p.to_owned()))?;
-    let config = load_profile(&profile_name)
+    let profile_name = config
+        .profile
+        .map_or_else(get_active, |p| Ok(p.to_owned()))?;
+    let profile_config = load_profile(&profile_name)
         .with_context(|| format!("Profile '{profile_name}' not found"))?;
 
     let project_dir = std::env::current_dir().context("cannot read current directory")?;
@@ -254,34 +257,34 @@ fn cmd_run(
             |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
         );
 
-    print_banner(&profile_name, &project_str, image);
+    print_banner(&profile_name, &project_str, config.image);
 
     let git_name = get_git_identity("user.name");
     let git_email = get_git_identity("user.email");
 
     let inputs = LaunchInputs {
-        image,
-        config: &config,
+        image: config.image,
+        config: &profile_config,
         project_dir: &project_str,
         base_name: &container_base_name,
         host_home: &home,
         uid: &uid,
         gid: &gid,
-        extra_claude_args: claude_args,
-        ports,
-        extra_mounts,
-        memory,
-        cpus,
-        host_access,
-        no_cache,
-        no_env,
-        gpus,
+        extra_claude_args: config.claude_args,
+        ports: config.ports,
+        extra_mounts: config.extra_mounts,
+        memory: config.memory,
+        cpus: config.cpus,
+        host_access: config.host_access,
+        cache: config.cache,
+        env: config.env,
+        gpus: config.gpus,
         nonce: std::process::id(),
         git_name: git_name.as_deref(),
         git_email: git_email.as_deref(),
     };
 
-    let plan = resolve_launch_plan(probe_container(backend, &container_base_name), inputs);
+    let plan = resolve_launch_plan(probe_container(backend, &container_base_name), &inputs);
 
     if plan.mode == container::LaunchMode::Resume {
         println!(
@@ -295,8 +298,8 @@ fn cmd_run(
     let mut cmd = std::process::Command::new(backend.binary_name());
     cmd.args(&plan.args);
 
-    if config.provider.needs_auth_token() {
-        cmd.env("ANTHROPIC_AUTH_TOKEN", &config.key);
+    if profile_config.provider.needs_auth_token() {
+        cmd.env("ANTHROPIC_AUTH_TOKEN", &profile_config.key);
     }
 
     let err = cmd.exec();
@@ -328,40 +331,21 @@ fn intercept_profile_shortcut() -> Option<String> {
     Some(first.clone())
 }
 
-fn main() -> Result<()> {
-    if let Some(profile_name) = intercept_profile_shortcut() {
-        cmd_key_use(&profile_name)?;
-        return cmd_run(
-            DEFAULT_IMAGE,
-            Some(&profile_name),
-            &[],
-            &[],
-            &[],
-            "",
-            "",
-            false,
-            false,
-            false,
-            false,
-        );
-    }
-
-    let cli = Cli::parse();
-
+fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        None => cmd_run(
-            &cli.image,
-            None,
-            &[],
-            &[],
-            &[],
-            "",
-            "",
-            false,
-            false,
-            false,
-            false,
-        ),
+        None => cmd_run(&RunConfig {
+            image: &cli.image,
+            profile: None,
+            claude_args: &[],
+            ports: &[],
+            extra_mounts: &[],
+            memory: "",
+            cpus: "",
+            host_access: HostAccess::Disabled,
+            cache: CacheMode::Persistent,
+            env: EnvMode::Loaded,
+            gpus: GpuMode::None,
+        }),
         Some(Cmd::Run {
             profile,
             ports,
@@ -373,19 +357,19 @@ fn main() -> Result<()> {
             no_cache,
             no_env,
             claude_args,
-        }) => cmd_run(
-            &cli.image,
-            profile.as_deref(),
-            &claude_args,
-            &ports,
-            &extra_mounts,
-            &memory,
-            &cpus,
-            gpus,
-            host_access,
-            no_cache,
-            no_env,
-        ),
+        }) => cmd_run(&RunConfig {
+            image: &cli.image,
+            profile: profile.as_deref(),
+            claude_args: &claude_args,
+            ports: &ports,
+            extra_mounts: &extra_mounts,
+            memory: &memory,
+            cpus: &cpus,
+            host_access: bool_to_host_access(host_access),
+            cache: bool_to_cache(no_cache),
+            env: bool_to_env(no_env),
+            gpus: bool_to_gpu(gpus),
+        }),
         Some(Cmd::Key { action }) => match action {
             KeyAction::Add {
                 name,
@@ -408,21 +392,22 @@ fn main() -> Result<()> {
             no_env,
             bash_args,
         }) => {
-            let mut combined = vec!["shell".to_string()];
-            combined.extend_from_slice(&bash_args);
-            cmd_run(
-                &cli.image,
-                profile.as_deref(),
-                &combined,
-                &ports,
-                &extra_mounts,
-                "",
-                "",
-                false,
-                host_access,
-                false,
-                no_env,
-            )
+            let combined: Vec<String> = std::iter::once("shell".to_string())
+                .chain(bash_args)
+                .collect();
+            cmd_run(&RunConfig {
+                image: &cli.image,
+                profile: profile.as_deref(),
+                claude_args: &combined,
+                ports: &ports,
+                extra_mounts: &extra_mounts,
+                memory: "",
+                cpus: "",
+                host_access: bool_to_host_access(host_access),
+                cache: CacheMode::Persistent,
+                env: bool_to_env(no_env),
+                gpus: GpuMode::None,
+            })
         }
         Some(Cmd::Stop { name }) => {
             let backend = detect_backend()?;
@@ -440,6 +425,67 @@ fn main() -> Result<()> {
             cmd_ps(backend)
         }
         Some(Cmd::InternalEntrypoint { args }) => entrypoint::cmd_internal_entrypoint(&args),
+    }
+}
+
+fn main() -> Result<()> {
+    if let Some(profile_name) = intercept_profile_shortcut() {
+        cmd_key_use(&profile_name)?;
+        let args: Vec<String> = std::env::args().collect();
+        let mut claude_args = Vec::new();
+        let mut found_separator = false;
+        for arg in args.iter().skip(2) {
+            if *arg == "--" {
+                found_separator = true;
+                continue;
+            }
+            if found_separator {
+                claude_args.push(arg.clone());
+            }
+        }
+        return cmd_run(&RunConfig {
+            image: DEFAULT_IMAGE,
+            profile: Some(&profile_name),
+            claude_args: &claude_args,
+            ports: &[],
+            extra_mounts: &[],
+            memory: "",
+            cpus: "",
+            host_access: HostAccess::Disabled,
+            cache: CacheMode::Persistent,
+            env: EnvMode::Loaded,
+            gpus: GpuMode::None,
+        });
+    }
+    dispatch(Cli::parse())
+}
+
+const fn bool_to_host_access(v: bool) -> HostAccess {
+    if v {
+        HostAccess::Enabled
+    } else {
+        HostAccess::Disabled
+    }
+}
+const fn bool_to_cache(v: bool) -> CacheMode {
+    if v {
+        CacheMode::Ephemeral
+    } else {
+        CacheMode::Persistent
+    }
+}
+const fn bool_to_env(v: bool) -> EnvMode {
+    if v {
+        EnvMode::Skipped
+    } else {
+        EnvMode::Loaded
+    }
+}
+const fn bool_to_gpu(v: bool) -> GpuMode {
+    if v {
+        GpuMode::All
+    } else {
+        GpuMode::None
     }
 }
 
