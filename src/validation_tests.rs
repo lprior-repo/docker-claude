@@ -1,7 +1,7 @@
 use crate::container::{
     bind_mounts_for_test, build_container_args, cache_args_for_test, container_env_args_for_test,
-    host_access_args_for_test, validated_mounts_for_test, validated_ports_for_test, ContainerState,
-    LaunchInputs,
+    host_access_args_for_test, validated_mounts_for_test, validated_ports_for_test, CacheMode,
+    ContainerState, HostAccess, LaunchInputs,
 };
 use crate::provider::{ProfileConfig, Provider};
 use crate::resolve_launch_plan;
@@ -20,10 +20,10 @@ fn make_inputs<'a>(config: &'a ProfileConfig, extra: &'a [String]) -> LaunchInpu
         extra_mounts: &[],
         memory: "",
         cpus: "",
-        host_access: false,
-        no_cache: false,
-        no_env: false,
-        gpus: false,
+        host_access: HostAccess::Disabled,
+        cache: CacheMode::Persistent,
+        env: crate::container::EnvMode::Loaded,
+        gpus: crate::container::GpuMode::None,
         nonce: 42,
         git_name: None,
         git_email: None,
@@ -281,8 +281,56 @@ fn adversarial_provider_env_never_overwrites_security() {
 }
 
 #[test]
+fn adversarial_agent_forwarding_args_correct_format() {
+    use std::fs::File;
+    let tmp_dir = std::env::temp_dir();
+    let ssh_sock = tmp_dir.join("ssh-agent.sock");
+    let gpg_sock = tmp_dir.join("gpg-agent.sock");
+    let _ = File::create(&ssh_sock);
+    let _ = File::create(&gpg_sock);
+
+    std::env::set_var("SSH_AUTH_SOCK", &ssh_sock);
+    std::env::set_var("GPG_AGENT_SOCK", &gpg_sock);
+
+    let config = anthropic_config();
+    let inputs = make_inputs(&config, &[]);
+    let args = build_container_args(&inputs, "test");
+
+    // Check SSH agent mount
+    let ssh_mount_idx = args
+        .iter()
+        .position(|a| a.contains("ssh-agent.sock:/tmp/ssh-agent.sock"));
+    assert!(
+        ssh_mount_idx.is_some(),
+        "SSH agent mount missing or malformed"
+    );
+    assert_eq!(
+        args[ssh_mount_idx.unwrap() - 1],
+        "-v",
+        "SSH agent mount must be preceded by -v"
+    );
+
+    // Check GPG agent mount
+    let gpg_mount_idx = args
+        .iter()
+        .position(|a| a.contains("gpg-agent.sock:/tmp/gpg-agent.sock"));
+    assert!(
+        gpg_mount_idx.is_some(),
+        "GPG agent mount missing or malformed"
+    );
+    assert_eq!(
+        args[gpg_mount_idx.unwrap() - 1],
+        "-v",
+        "GPG agent mount must be preceded by -v"
+    );
+
+    let _ = std::fs::remove_file(ssh_sock);
+    let _ = std::fs::remove_file(gpg_sock);
+}
+
+#[test]
 fn adversarial_host_access_is_truly_off_by_default() {
-    let args = host_access_args_for_test(false);
+    let args = host_access_args_for_test(HostAccess::Disabled);
     assert!(
         args.is_empty(),
         "host access must produce zero args when off"
@@ -291,7 +339,7 @@ fn adversarial_host_access_is_truly_off_by_default() {
 
 #[test]
 fn adversarial_host_access_adds_exact_string() {
-    let args = host_access_args_for_test(true);
+    let args = host_access_args_for_test(HostAccess::Enabled);
     assert!(
         args.contains(&"--add-host".into()),
         "must use --add-host not --network host"
@@ -304,7 +352,7 @@ fn adversarial_host_access_adds_exact_string() {
 
 #[test]
 fn adversarial_no_cache_produces_no_volume_refs() {
-    let args = cache_args_for_test("claude-test", true);
+    let args = cache_args_for_test("claude-test", CacheMode::Ephemeral);
     assert!(args.iter().any(|a| a.contains("--tmpfs")));
     assert!(
         !args.iter().any(|a| a.contains("claude-dock-")),
@@ -314,7 +362,7 @@ fn adversarial_no_cache_produces_no_volume_refs() {
 
 #[test]
 fn adversarial_cache_uses_named_volumes_not_bind_mounts() {
-    let args = cache_args_for_test("claude-test", false);
+    let args = cache_args_for_test("claude-test", CacheMode::Persistent);
     assert!(
         args.iter()
             .any(|a| a.contains("claude-dock-claude-test-target")),
@@ -439,7 +487,7 @@ fn adversarial_project_dir_always_mounted_at_app() {
 fn adversarial_launch_plan_missing_creates_new_container() {
     let config = anthropic_config();
     let inputs = make_inputs(&config, &[]);
-    let plan = resolve_launch_plan(ContainerState::Missing, inputs);
+    let plan = resolve_launch_plan(ContainerState::Missing, &inputs);
     assert_eq!(plan.mode, crate::container::LaunchMode::New);
     assert!(
         plan.args.contains(&"run".into()),
@@ -451,7 +499,7 @@ fn adversarial_launch_plan_missing_creates_new_container() {
 fn adversarial_launch_plan_running_creates_suffixed_container() {
     let config = anthropic_config();
     let inputs = make_inputs(&config, &[]);
-    let plan = resolve_launch_plan(ContainerState::Running, inputs);
+    let plan = resolve_launch_plan(ContainerState::Running, &inputs);
     assert!(
         plan.container_name.ends_with("-42"),
         "must suffix with nonce to avoid collision"
@@ -563,6 +611,38 @@ fn adversarial_ssh_config_sanitization_strips_proxycommand() {
         !content.contains("PermitLocalCommand"),
         "PermitLocalCommand must be stripped: {content}"
     );
+    let _ = fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn adversarial_ssh_config_strips_new_dangerous_directives() {
+    use crate::validation::ssh_config_path;
+    use std::fs;
+    let tmp = std::env::temp_dir().join("test-ssh-new-directives");
+    let _ = fs::create_dir_all(tmp.join(".ssh"));
+    let _ = fs::write(
+        tmp.join(".ssh/config"),
+        "Host evil\n  ForwardAgent yes\n  SendEnv LANG\n  SetEnv FOO=bar\n  CertificateFile ~/.ssh/id_cert\n  PKCS11Provider /usr/lib/opensc-pkcs11.so\n  HostName github.com\n",
+    );
+    let result = ssh_config_path(&tmp.to_string_lossy());
+    assert!(result.is_some(), "sanitized config should be produced");
+    let path = result.unwrap();
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        !content.contains("ForwardAgent"),
+        "ForwardAgent must be stripped"
+    );
+    assert!(!content.contains("SendEnv"), "SendEnv must be stripped");
+    assert!(!content.contains("SetEnv"), "SetEnv must be stripped");
+    assert!(
+        !content.contains("CertificateFile"),
+        "CertificateFile must be stripped"
+    );
+    assert!(
+        !content.contains("PKCS11Provider"),
+        "PKCS11Provider must be stripped"
+    );
+    assert!(content.contains("HostName"), "HostName must be preserved");
     let _ = fs::remove_dir_all(tmp);
 }
 

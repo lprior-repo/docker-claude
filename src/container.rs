@@ -15,7 +15,7 @@ pub enum ContainerBackend {
 }
 
 impl ContainerBackend {
-    pub fn binary_name(&self) -> &'static str {
+    pub fn binary_name(self) -> &'static str {
         match self {
             ContainerBackend::Docker => "docker",
             ContainerBackend::Podman => "podman",
@@ -111,6 +111,35 @@ pub struct LaunchPlan {
     pub args: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Default)]
+pub enum HostAccess {
+    #[default]
+    Disabled,
+    Enabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Default)]
+pub enum CacheMode {
+    #[default]
+    Persistent,
+    Ephemeral,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Default)]
+pub enum EnvMode {
+    #[default]
+    Loaded,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Default)]
+pub enum GpuMode {
+    #[default]
+    None,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchInputs<'a> {
     pub image: &'a str,
     pub config: &'a crate::provider::ProfileConfig,
@@ -124,16 +153,17 @@ pub struct LaunchInputs<'a> {
     pub extra_mounts: &'a [String],
     pub memory: &'a str,
     pub cpus: &'a str,
-    pub host_access: bool,
-    pub no_cache: bool,
-    pub no_env: bool,
-    pub gpus: bool,
+    pub host_access: HostAccess,
+    pub cache: CacheMode,
+    pub env: EnvMode,
+    pub gpus: GpuMode,
     pub nonce: u32,
     pub git_name: Option<&'a str>,
     pub git_email: Option<&'a str>,
 }
 
-pub fn resolve_launch_plan(state: ContainerState, inputs: LaunchInputs<'_>) -> LaunchPlan {
+#[allow(clippy::needless_pass_by_value)]
+pub fn resolve_launch_plan(state: ContainerState, inputs: &LaunchInputs<'_>) -> LaunchPlan {
     match state {
         ContainerState::Stopped => LaunchPlan {
             mode: LaunchMode::Resume,
@@ -149,24 +179,27 @@ pub fn resolve_launch_plan(state: ContainerState, inputs: LaunchInputs<'_>) -> L
             LaunchPlan {
                 mode: LaunchMode::New,
                 container_name: container_name.clone(),
-                args: new_container_args(&inputs, &container_name),
+                args: new_container_args(inputs, &container_name),
             }
         }
     }
 }
 
 fn security_args() -> Vec<String> {
-    vec![
-        "--read-only".into(),
-        "--cap-drop".into(),
-        "ALL".into(),
-        "--security-opt".into(),
-        "no-new-privileges:true".into(),
-        "--ulimit".into(),
-        "nofile=65536:65536".into(),
-        "--pids-limit".into(),
-        "512".into(),
+    [
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--ulimit",
+        "nofile=65536:65536",
+        "--pids-limit",
+        "512",
     ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 fn resource_args(memory: &str, cpus: &str) -> Vec<String> {
@@ -177,44 +210,48 @@ fn resource_args(memory: &str, cpus: &str) -> Vec<String> {
     } else {
         memory
     };
-    let mut args = vec![
-        "--memory".into(),
-        effective.into(),
-        "--memory-swap".into(),
-        effective.into(),
-    ];
-    if !cpus.is_empty() {
-        args.extend(["--cpus".into(), cpus.into()]);
-    }
-    args
+    let base: Vec<String> = ["--memory", effective, "--memory-swap", effective]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let cpu_arg: Vec<String> = if cpus.is_empty() {
+        Vec::new()
+    } else {
+        vec!["--cpus".to_string(), cpus.to_string()]
+    };
+    base.into_iter().chain(cpu_arg).collect()
 }
 
 fn validated_ports(ports: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    for port in ports {
-        if let Err(e) = validate_port(port) {
-            eprintln!("WARN: {e} — skipping");
-            continue;
-        }
-        out.extend(["-p".into(), port.clone()]);
-    }
-    out
+    ports
+        .iter()
+        .filter_map(|port| {
+            validate_port(port)
+                .map(|()| ["-p".to_string(), port.clone()])
+                .map(Vec::from)
+                .map_err(|e| eprintln!("WARN: {e} — skipping"))
+                .ok()
+        })
+        .flatten()
+        .collect()
 }
 
 fn validated_mounts(mounts: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    for mount in mounts {
-        if let Err(e) = validate_mount(mount) {
-            eprintln!("WARN: {e} — skipping");
-            continue;
-        }
-        out.extend(["-v".into(), mount.clone()]);
-    }
-    out
+    mounts
+        .iter()
+        .filter_map(|mount| {
+            validate_mount(mount)
+                .map(|()| ["-v".to_string(), mount.clone()])
+                .map(Vec::from)
+                .map_err(|e| eprintln!("WARN: {e} — skipping"))
+                .ok()
+        })
+        .flatten()
+        .collect()
 }
 
 fn bind_mounts(inputs: &LaunchInputs<'_>) -> Vec<String> {
-    let mut mounts = vec![
+    let base_mounts: Vec<String> = vec![
         format!("{}:/app", inputs.project_dir),
         format!("{}/.claude:/home/user/.claude", inputs.host_home),
         format!(
@@ -224,27 +261,34 @@ fn bind_mounts(inputs: &LaunchInputs<'_>) -> Vec<String> {
         format!("{}/.gitconfig:/home/user/.gitconfig:ro", inputs.host_home),
         format!("{}/.jj:/home/user/.jj:ro", inputs.host_home),
     ];
-    for (rel, dest) in [
+    let optional_configs: Vec<String> = [
         (".zshrc", "/home/user/.zshrc"),
         (".zshenv", "/home/user/.zshenv"),
         (".zprofile", "/home/user/.zprofile"),
         (".config/starship.toml", "/home/user/.config/starship.toml"),
-    ] {
-        if let Some(m) = optional_file_mount(inputs.host_home, rel, dest) {
-            mounts.push(m);
-        }
-    }
-    if let Some(known_hosts) = ssh_known_hosts_path(inputs.host_home) {
-        mounts.push(format!("{known_hosts}:/home/user/.ssh/known_hosts:ro"));
-    }
-    if let Some(ssh_config) = ssh_config_path(inputs.host_home) {
-        mounts.push(format!("{ssh_config}:/home/user/.ssh/config:ro"));
-    }
-    mounts.into_iter().flat_map(|m| ["-v".into(), m]).collect()
+    ]
+    .into_iter()
+    .filter_map(|(rel, dest)| optional_file_mount(inputs.host_home, rel, dest))
+    .collect();
+    let ssh_mounts: Vec<String> = [
+        ssh_known_hosts_path(inputs.host_home)
+            .map(|p| format!("{p}:/home/user/.ssh/known_hosts:ro")),
+        ssh_config_path(inputs.host_home).map(|p| format!("{p}:/home/user/.ssh/config:ro")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    base_mounts
+        .into_iter()
+        .chain(optional_configs)
+        .chain(ssh_mounts)
+        .flat_map(|m| ["-v".to_string(), m])
+        .collect()
 }
 
 fn env_file_arg(inputs: &LaunchInputs<'_>) -> Vec<String> {
-    if inputs.no_env {
+    if inputs.env == EnvMode::Skipped {
         return Vec::new();
     }
     let env_file = format!("{}/.env", inputs.project_dir);
@@ -269,27 +313,27 @@ fn tmpfs_args() -> Vec<String> {
     .collect()
 }
 
-fn cache_args(cname: &str, no_cache: bool) -> Vec<String> {
-    if no_cache {
+fn cache_args(cname: &str, cache: CacheMode) -> Vec<String> {
+    if cache == CacheMode::Ephemeral {
         return vec!["--tmpfs".into(), "/app/target:size=2g".into()];
     }
-    let vols = [
-        format!("{}:/app/target", cache_volume_name(cname, "target")),
-        format!(
-            "{}:/root/.cargo/registry",
-            cache_volume_name(cname, "cargo-registry")
-        ),
-        format!("{}:/root/.cargo/git", cache_volume_name(cname, "cargo-git")),
-        format!("{}:/root/.rustup", cache_volume_name(cname, "rustup")),
-    ];
-    vols.into_iter().flat_map(|v| ["-v".into(), v]).collect()
+    [
+        ("target", "/app/target"),
+        ("cargo-registry", "/root/.cargo/registry"),
+        ("cargo-git", "/root/.cargo/git"),
+        ("rustup", "/root/.rustup"),
+    ]
+    .into_iter()
+    .map(|(suffix, dest)| format!("{}:{dest}", cache_volume_name(cname, suffix)))
+    .flat_map(|v| ["-v".into(), v])
+    .collect()
 }
 
-fn host_access_arg(host_access: bool) -> Vec<String> {
-    if host_access {
+fn host_access_arg(host_access: HostAccess) -> Vec<String> {
+    if host_access == HostAccess::Enabled {
         vec![
-            "--add-host".into(),
-            "host.docker.internal:host-gateway".into(),
+            "--add-host".to_string(),
+            "host.docker.internal:host-gateway".to_string(),
         ]
     } else {
         Vec::new()
@@ -297,26 +341,29 @@ fn host_access_arg(host_access: bool) -> Vec<String> {
 }
 
 fn agent_forwarding_args(uid: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    if let Some(sock) = ssh_agent_socket_path() {
-        args.extend([
-            "-v".into(),
-            format!("{sock}:/tmp/ssh-agent.sock"),
-            "-e".into(),
-            "SSH_AUTH_SOCK=/tmp/ssh-agent.sock".into(),
-        ]);
-    }
-    if let Some(sock) = gpg_agent_socket_path(uid) {
-        args.extend([
-            "-v".into(),
-            format!("{sock}:/tmp/gpg-agent.sock"),
-            "-e".into(),
-            "GPG_AGENT_SOCK=/tmp/gpg-agent.sock".into(),
-            "-e".into(),
-            "GPG_TTY=/dev/tty".into(),
-        ]);
-    }
-    args
+    let ssh_args: Vec<String> = ssh_agent_socket_path()
+        .map(|sock| {
+            vec![
+                "-v".into(),
+                format!("{sock}:/tmp/ssh-agent.sock"),
+                "-e".into(),
+                "SSH_AUTH_SOCK=/tmp/ssh-agent.sock".into(),
+            ]
+        })
+        .unwrap_or_default();
+    let gpg_args: Vec<String> = gpg_agent_socket_path(uid)
+        .map(|sock| {
+            vec![
+                "-v".into(),
+                format!("{sock}:/tmp/gpg-agent.sock"),
+                "-e".into(),
+                "GPG_AGENT_SOCK=/tmp/gpg-agent.sock".into(),
+                "-e".into(),
+                "GPG_TTY=/dev/tty".into(),
+            ]
+        })
+        .unwrap_or_default();
+    ssh_args.into_iter().chain(gpg_args).collect()
 }
 
 fn container_env_args(inputs: &LaunchInputs<'_>) -> Vec<String> {
@@ -325,40 +372,57 @@ fn container_env_args(inputs: &LaunchInputs<'_>) -> Vec<String> {
     } else {
         inputs.host_home
     };
-    let mut args = vec![
-        "-e".into(),
-        "HOME=/home/user".into(),
-        "-e".into(),
-        format!("HOST_HOME={host_home}"),
-        "-e".into(),
-        format!("CONTAINER_USER_ID={}", inputs.uid),
-        "-e".into(),
-        format!("CONTAINER_GROUP_ID={}", inputs.gid),
-    ];
-    if let Some(name) = inputs.git_name {
-        args.extend([
-            "-e".into(),
-            format!("GIT_AUTHOR_NAME={name}"),
-            "-e".into(),
-            format!("GIT_COMMITTER_NAME={name}"),
-        ]);
-    }
-    if let Some(email) = inputs.git_email {
-        args.extend([
-            "-e".into(),
-            format!("GIT_AUTHOR_EMAIL={email}"),
-            "-e".into(),
-            format!("GIT_COMMITTER_EMAIL={email}"),
-        ]);
-    }
-    for (key, value) in inputs.config.provider.env_vars() {
-        if value.is_empty() {
-            args.extend(["-e".into(), key.into()]);
-        } else {
-            args.extend(env_arg(key, value));
-        }
-    }
-    args
+    [
+        ("HOME", "/home/user"),
+        ("HOST_HOME", host_home),
+        ("CONTAINER_USER_ID", inputs.uid),
+        ("CONTAINER_GROUP_ID", inputs.gid),
+    ]
+    .into_iter()
+    .flat_map(|(k, v)| ["-e".to_string(), format!("{k}={v}")])
+    .chain(
+        inputs
+            .git_name
+            .map(|n| {
+                [
+                    "-e".to_string(),
+                    format!("GIT_AUTHOR_NAME={n}"),
+                    "-e".into(),
+                    format!("GIT_COMMITTER_NAME={n}"),
+                ]
+            })
+            .into_iter()
+            .flatten(),
+    )
+    .chain(
+        inputs
+            .git_email
+            .map(|e| {
+                [
+                    "-e".to_string(),
+                    format!("GIT_AUTHOR_EMAIL={e}"),
+                    "-e".into(),
+                    format!("GIT_COMMITTER_EMAIL={e}"),
+                ]
+            })
+            .into_iter()
+            .flatten(),
+    )
+    .chain(
+        inputs
+            .config
+            .provider
+            .env_vars()
+            .into_iter()
+            .flat_map(|(key, value)| {
+                if value.is_empty() {
+                    vec!["-e".to_string(), key.to_string()]
+                } else {
+                    env_arg(key, value)
+                }
+            }),
+    )
+    .collect()
 }
 
 fn new_container_args(inputs: &LaunchInputs<'_>, cname: &str) -> Vec<String> {
@@ -367,42 +431,49 @@ fn new_container_args(inputs: &LaunchInputs<'_>, cname: &str) -> Vec<String> {
         .iter()
         .any(|arg| arg == "-p" || arg == "--print");
 
-    let mut args = vec![
-        "run".into(),
-        if uses_print_mode {
-            "-i".into()
-        } else {
-            "-it".into()
-        },
-        "--rm".into(),
-        "--name".into(),
-        cname.into(),
-        "--entrypoint".into(),
-        "/usr/local/bin/claude-dock".into(),
-    ];
+    let header: Vec<String> = [
+        "run",
+        if uses_print_mode { "-i" } else { "-it" },
+        "--rm",
+        "--name",
+        cname,
+        "--entrypoint",
+        "/usr/local/bin/claude-dock",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
 
-    args.extend(security_args());
-    args.extend(resource_args(inputs.memory, inputs.cpus));
+    let gpu_arg: Vec<String> = if inputs.gpus == GpuMode::All {
+        vec!["--gpus".to_string(), "all".to_string()]
+    } else {
+        Vec::new()
+    };
 
-    if inputs.gpus {
-        args.extend(["--gpus".into(), "all".into()]);
-    }
+    let claude_args: Vec<String> = [inputs.image.into(), "__entrypoint".into(), "--".into()]
+        .into_iter()
+        .chain(inputs.extra_claude_args.iter().cloned())
+        .collect();
 
-    args.extend(validated_ports(inputs.ports));
-    args.extend(validated_mounts(inputs.extra_mounts));
-    args.extend(bind_mounts(inputs));
-    args.extend(env_file_arg(inputs));
-    args.extend(tmpfs_args());
-    args.extend(cache_args(cname, inputs.no_cache));
-    args.extend(host_access_arg(inputs.host_access));
-    args.extend(agent_forwarding_args(inputs.uid));
-    args.extend(container_env_args(inputs));
-
-    args.push(inputs.image.into());
-    args.push("__entrypoint".into());
-    args.push("--".into());
-    args.extend_from_slice(inputs.extra_claude_args);
-    args
+    [
+        header,
+        security_args(),
+        resource_args(inputs.memory, inputs.cpus),
+        gpu_arg,
+        validated_ports(inputs.ports),
+        validated_mounts(inputs.extra_mounts),
+        bind_mounts(inputs),
+        env_file_arg(inputs),
+        tmpfs_args(),
+        cache_args(cname, inputs.cache),
+        host_access_arg(inputs.host_access),
+        agent_forwarding_args(inputs.uid),
+        container_env_args(inputs),
+        claude_args,
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn cache_volume_name(base_name: &str, suffix: &str) -> String {
@@ -425,15 +496,15 @@ pub fn cmd_cleanup(backend: ContainerBackend) -> Result<()> {
         ])
         .output()?;
     let names = String::from_utf8_lossy(&output.stdout);
-    for name in names.lines() {
-        let name = name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let _ = Command::new(backend.binary_name())
-            .args(["rm", "-f", name])
-            .status();
-    }
+    names
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .for_each(|name| {
+            let _ = Command::new(backend.binary_name())
+                .args(["rm", "-f", name])
+                .status();
+        });
     let vol_output = Command::new(backend.binary_name())
         .args([
             "volume",
@@ -445,15 +516,14 @@ pub fn cmd_cleanup(backend: ContainerBackend) -> Result<()> {
         ])
         .output()?;
     let vols = String::from_utf8_lossy(&vol_output.stdout);
-    for vol in vols.lines() {
-        let vol = vol.trim();
-        if vol.is_empty() {
-            continue;
-        }
-        let _ = Command::new(backend.binary_name())
-            .args(["volume", "rm", "-f", vol])
-            .status();
-    }
+    vols.lines()
+        .map(str::trim)
+        .filter(|vol| !vol.is_empty())
+        .for_each(|vol| {
+            let _ = Command::new(backend.binary_name())
+                .args(["volume", "rm", "-f", vol])
+                .status();
+        });
     Ok(())
 }
 
@@ -514,11 +584,6 @@ pub fn security_args_for_test() -> Vec<String> {
 }
 
 #[cfg(test)]
-pub fn resource_args_for_test(memory: &str, cpus: &str) -> Vec<String> {
-    resource_args(memory, cpus)
-}
-
-#[cfg(test)]
 pub fn validated_ports_for_test(ports: &[String]) -> Vec<String> {
     validated_ports(ports)
 }
@@ -534,17 +599,12 @@ pub fn bind_mounts_for_test(inputs: &LaunchInputs<'_>) -> Vec<String> {
 }
 
 #[cfg(test)]
-pub fn tmpfs_args_for_test() -> Vec<String> {
-    tmpfs_args()
+pub fn cache_args_for_test(cname: &str, cache: CacheMode) -> Vec<String> {
+    cache_args(cname, cache)
 }
 
 #[cfg(test)]
-pub fn cache_args_for_test(cname: &str, no_cache: bool) -> Vec<String> {
-    cache_args(cname, no_cache)
-}
-
-#[cfg(test)]
-pub fn host_access_args_for_test(host_access: bool) -> Vec<String> {
+pub fn host_access_args_for_test(host_access: HostAccess) -> Vec<String> {
     host_access_arg(host_access)
 }
 
