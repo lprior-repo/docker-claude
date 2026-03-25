@@ -250,11 +250,31 @@ fn validated_mounts(mounts: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn setup_host_claude_json(host_home: &str) -> Result<()> {
+    let claude_dir = format!("{}/.claude", host_home);
+    let claude_json = format!("{}/.claude.json", host_home);
+    let target_json = format!("{}/.claude.json", claude_dir);
+
+    // Ensure ~/.claude exists
+    let _ = std::fs::create_dir_all(&claude_dir);
+
+    if let Ok(meta) = std::fs::symlink_metadata(&claude_json) {
+        if !meta.file_type().is_symlink() {
+            // Migrate to new location
+            if std::fs::copy(&claude_json, &target_json).is_ok() {
+                let _ = std::fs::remove_file(&claude_json);
+                let _ = std::os::unix::fs::symlink(".claude/.claude.json", &claude_json);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn bind_mounts(inputs: &LaunchInputs<'_>) -> Vec<String> {
+    let _ = setup_host_claude_json(inputs.host_home);
     let base_mounts: Vec<String> = vec![
         format!("{}:/app", inputs.project_dir),
         format!("{}/.claude:/home/user/.claude", inputs.host_home),
-        format!("{}/.claude.json:/home/user/.claude.json", inputs.host_home),
         format!("{}/.gitconfig:/home/user/.gitconfig:ro", inputs.host_home),
         format!("{}/.jj:/home/user/.jj:ro", inputs.host_home),
     ];
@@ -374,6 +394,7 @@ fn container_env_args(inputs: &LaunchInputs<'_>) -> Vec<String> {
         ("HOST_HOME", host_home),
         ("CONTAINER_USER_ID", inputs.uid),
         ("CONTAINER_GROUP_ID", inputs.gid),
+        ("CLAUDE_CONFIG_DIR", "/home/user/.claude"),
     ]
     .into_iter()
     .flat_map(|(k, v)| ["-e".to_string(), format!("{k}={v}")])

@@ -44,9 +44,21 @@ Thousands of `chown: changing ownership of '/home/user/...': Operation not permi
 #### 6. Claude Code Hangs in Interactive Mode (The `.claude.json` Issue)
 When running `claude-dock glm1` interactively, Claude Code would hang indefinitely without showing the prompt.
 
-**Root Cause**: Through `strace`, we discovered Claude tries to write to or lock `.claude.json` on startup. Because `.claude.json` was mounted with `:ro` (read-only) and the root filesystem is also `--read-only`, Claude would get `EACCES` or `EROFS` when trying to manage its configuration, causing it to fall into an infinite retry loop or lockup.
+**Root Cause**: Claude uses `write-file-atomic` to update `~/.claude.json`, which works by writing to `~/.claude.json.tmp...` and then `rename()`-ing it over the original file. Since the container runs with a `--read-only` root filesystem (meaning `/home/user` is read-only), creating the tmp file in `~` fails with `EROFS`.
+Even if we mounted a file directly (`-v ~/.claude.json:/home/user/.claude.json`), Docker prevents `rename()` over bind-mounted files with `EBUSY`.
 
-**Fix**: Changed the bind mount in `src/container.rs` to mount `.claude.json` read/write (removed `:ro`).
+**Fix**:
+1. Added a migration in `src/container.rs` that runs on the host before launching the container. It moves `~/.claude.json` to `~/.claude/.claude.json` and creates a symlink in its place (`~/.claude.json -> .claude/.claude.json`).
+2. Added `-e CLAUDE_CONFIG_DIR=/home/user/.claude` to the container env vars.
+3. Removed the file-level bind mount for `.claude.json`.
+Now, Claude inside the container writes atomic config updates natively into the bind-mounted directory `/home/user/.claude`, bypassing the read-only root FS and avoiding `EBUSY`. Because the host has a symlink, native `claude` executions share the exact same config file.
+
+#### 7. Claude Hangs Mid-Sentence During Large Output
+When generating large blocks of text (like markdown tables), Claude would completely freeze mid-sentence.
+
+**Root Cause**: Docker Bridge network MTU mismatch. When a proxy API (like Z.ai or Minimax) sends a large burst of data, the packet size can exceed the Docker virtual bridge's MTU limit (often 1500, but lower if using a VPN). The packets are silently dropped, and Claude's Node `fetch` client waits forever because the TCP connection isn't cleanly closed.
+
+**Fix**: Switched to using `--network host` mode in `src/container.rs` (`--network host`). This attaches the container directly to the Linux host's network interface, eliminating Docker's virtual bridge and preventing MTU packet drops.
 
 **File**: `src/container.rs`
 
