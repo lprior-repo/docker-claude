@@ -6,8 +6,8 @@ use anyhow::Context;
 pub fn setup_system_user(_uid: &str, _gid: &str) {
     let _user_claude_exists = Command::new("id")
         .args(["claudeuser"])
-        .status()
-        .map_or(false, |s| s.success());
+        .output()
+        .is_ok_and(|s| s.status.success());
 }
 
 pub fn setup_socket_forwarding() {
@@ -49,7 +49,7 @@ pub fn setup_host_home_symlink() -> anyhow::Result<()> {
         Ok(_) => Ok(()),
         Err(e) => {
             if e.kind() == std::io::ErrorKind::ReadOnlyFilesystem {
-                eprintln!("WARN: read-only filesystem, skipping symlink creation");
+                // Silently skip, as read-only filesystem is expected in secure containers
                 Ok(())
             } else {
                 Err(e.into())
@@ -71,18 +71,10 @@ pub fn setup_claude_binary() -> anyhow::Result<()> {
         "/root/.local/bin/claude",
         "/usr/bin/claude",
     ];
-    if sources.iter().any(|s| std::path::Path::new(s).exists()) {
-        let script = "#!/bin/sh\nexec /usr/local/bin/claude \"$@\"\n";
-        if let Err(e) = std::fs::write(&target_bin, script) {
-            if e.kind() != std::io::ErrorKind::PermissionDenied {
-                eprintln!("WARN: could not write {}: {}", target_bin, e);
-            }
-            return Ok(());
-        }
-        if let Ok(metadata) = std::fs::metadata(&target_bin) {
-            let mut perms = metadata.permissions();
-            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-            let _ = std::fs::set_permissions(&target_bin, perms);
+    if let Some(source) = sources.iter().find(|s| std::path::Path::new(s).exists()) {
+        let _ = std::fs::remove_file(&target_bin);
+        if let Err(e) = std::os::unix::fs::symlink(source, &target_bin) {
+            eprintln!("WARN: could not symlink {source} to {target_bin}: {e}");
         }
     }
     Ok(())
@@ -96,7 +88,9 @@ pub fn setup_path() {
     let content = r#"export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
 "#;
     if let Err(e) = std::fs::write(profile, content) {
-        eprintln!("WARN: could not write /home/user/.profile: {}", e);
+        if e.kind() != std::io::ErrorKind::ReadOnlyFilesystem {
+            eprintln!("WARN: could not write /home/user/.profile: {}", e);
+        }
     }
 }
 
@@ -127,11 +121,6 @@ pub fn cmd_internal_entrypoint(args: &[String]) -> anyhow::Result<()> {
         claude_cmd.extend(actual_args);
         claude_cmd
     };
-    eprintln!(
-        "executing inside container: {} {:?}",
-        cmd_args[0],
-        &cmd_args[1..]
-    );
     let err = Command::new(&cmd_args[0]).args(&cmd_args[1..]).exec();
     eprintln!("exec failed: {}", err);
     Err(err).context("exec")

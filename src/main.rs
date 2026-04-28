@@ -119,12 +119,12 @@ fn print_banner(profile_name: &str, project_str: &str, image: &str) {
     println!("  {} {}", "Project :".dimmed(), project_str.yellow());
     println!("  {} {}", "Image   :".dimmed(), image.dimmed());
     println!();
-    println!("  {}", "Hello, gorgeous.".bold());
-    println!("  Claude Code is your containerized coding girl with a plan.");
-    println!("  She reads the codebase, runs commands, edits files, and");
+    println!("  {}", "Hello, gorgeous.".dimmed());
+    println!("  Claude Code is ready to work.");
+    println!("  It reads the codebase, runs commands, edits files, and");
     println!("  helps you steer everything through plain English conversation.");
     println!();
-    println!("  {}", "Tell her what you want:".bold());
+    println!("  {}", "Tell Claude what you want:".bold());
     println!(
         "    {} {}",
         ">".bright_cyan(),
